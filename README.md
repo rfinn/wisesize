@@ -38,6 +38,19 @@ bash ~/github/wisesize/scripts/run_wisesize_cigale_draco.sh
 Pass one or more chunk numbers to run only those chunks, for example `01` or
 `02 03`. The launcher refuses to overwrite an existing `out/` directory.
 
+After all chunks finish, validate and combine their CIGALE catalogs with:
+
+```bash
+python ~/github/wisesize/scripts/collect_cigale_chunk_results.py
+```
+
+This writes
+`/mnt/astro/SGA-CIGALE/results/wisesize_sga2025_ap03_z0002_0025_w3snr10_results.fits`.
+The combined table includes an explicit `SGAID` cross-match key and a
+`CIGALE_CHUNK` provenance column. The collector checks each result ID against
+the corresponding CIGALE input and stops on missing, unexpected, or duplicate
+IDs. To collect one completed chunk independently, pass `--chunks 1`.
+
 ## CIGALE SLURM benchmark
 
 `make_cigale_slurm_benchmark.py` creates separate CIGALE configurations for
