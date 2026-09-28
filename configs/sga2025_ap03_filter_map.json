@@ -1,0 +1,40 @@
+{
+  "FUV": "galex.FUV",
+  "NUV": "galex.NUV",
+  "G": [
+    {
+      "filter": "decamDR1-g",
+      "dec_lt": 32.375
+    },
+    {
+      "filter": "BASS-g",
+      "dec_ge": 32.375
+    }
+  ],
+  "R": [
+    {
+      "filter": "decamDR1-r",
+      "dec_lt": 32.375
+    },
+    {
+      "filter": "BASS-r",
+      "dec_ge": 32.375
+    }
+  ],
+  "I": [
+    {
+      "filter": "decamDR1-i",
+      "dec_lt": 32.375
+    }
+  ],
+  "Z": [
+    {
+      "filter": "decamDR1-z",
+      "dec_lt": 32.375
+    }
+  ],
+  "W1": "wise.W1",
+  "W2": "wise.W2",
+  "W3": "wise.W3",
+  "W4": "wise.W4"
+}
