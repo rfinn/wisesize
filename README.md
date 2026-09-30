@@ -51,6 +51,19 @@ The combined table includes an explicit `SGAID` cross-match key and a
 the corresponding CIGALE input and stops on missing, unexpected, or duplicate
 IDs. To collect one completed chunk independently, pass `--chunks 1`.
 
+To test the first 500 objects from chunk 1 using Draco's local ZFS storage,
+prepare and run an isolated benchmark with:
+
+```bash
+python ~/github/wisesize/scripts/prepare_cigale_subset_benchmark.py
+/data-pool/rfinn/SGA-CIGALE/cigale_runs/\
+wisesize_sga2025_ap03_z0002_0025_w3snr10_chunk01_first500_localdisk/\
+run-benchmark.sh
+```
+
+The benchmark copies only the configuration and selected input rows from
+`/mnt/astro`; its cache, run files, log, and results remain on `/data-pool`.
+
 ## CIGALE SLURM benchmark
 
 `make_cigale_slurm_benchmark.py` creates separate CIGALE configurations for
