@@ -63,6 +63,9 @@ run-benchmark.sh
 
 The benchmark copies only the configuration and selected input rows from
 `/mnt/astro`; its cache, run files, log, and results remain on `/data-pool`.
+Use `--config-run` and `--input-file` to pair a configuration with a different
+input table for controlled timing comparisons. The generated configuration
+uses eight CIGALE workers unless `--cores` is specified.
 
 ## CIGALE SLURM benchmark
 

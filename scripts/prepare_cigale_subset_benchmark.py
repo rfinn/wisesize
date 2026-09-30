@@ -36,14 +36,33 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--source-run",
+        "--config-run",
+        dest="source_run",
         default=DEFAULT_SOURCE_RUN,
-        help=f"Existing run directory name (default: {DEFAULT_SOURCE_RUN}).",
+        help=(
+            "Existing run directory from which to copy the configuration "
+            f"(default: {DEFAULT_SOURCE_RUN})."
+        ),
+    )
+    parser.add_argument(
+        "--input-file",
+        type=Path,
+        help=(
+            "CIGALE input table to subset. By default, use the data_file from "
+            "the selected configuration."
+        ),
     )
     parser.add_argument(
         "--n-objects",
         type=int,
         default=500,
         help="Number of input objects to retain (default: 500).",
+    )
+    parser.add_argument(
+        "--cores",
+        type=int,
+        default=8,
+        help="Number of CIGALE worker processes to configure (default: 8).",
     )
     parser.add_argument(
         "--name",
@@ -100,10 +119,10 @@ def copy_input_subset(source: Path, destination: Path, n_objects: int) -> None:
         destination_handle.writelines(rows)
 
 
-def write_launcher(path: Path, root: Path, run_name: str) -> None:
+def write_launcher(path: Path, root: Path, run_name: str, cores: int) -> None:
     run_dir = root / "cigale_runs" / run_name
     cache_dir = root / "cache"
-    log_name = f"run-cores8-{run_name}.log"
+    log_name = f"run-cores{cores}-{run_name}.log"
     launcher = f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -127,6 +146,8 @@ PCIGALE=${{PCIGALE:-pcigale}}
 
 def main() -> None:
     args = parse_args()
+    if args.cores < 1:
+        raise ValueError("--cores must be positive")
     run_name = args.name or f"{args.source_run}_first{args.n_objects}_localdisk"
     source_run_dir = args.source_root / "cigale_runs" / args.source_run
     source_config = source_run_dir / "pcigale.ini"
@@ -136,8 +157,11 @@ def main() -> None:
         raise FileNotFoundError(f"Missing CIGALE configuration under {source_run_dir}")
 
     config_text = source_config.read_text(encoding="utf-8")
-    source_data_setting = config_value(config_text, "data_file")
-    source_data = (source_run_dir / source_data_setting).resolve()
+    if args.input_file is None:
+        source_data_setting = config_value(config_text, "data_file")
+        source_data = (source_run_dir / source_data_setting).resolve()
+    else:
+        source_data = args.input_file.expanduser().resolve()
     if not source_data.is_file():
         raise FileNotFoundError(f"Missing source input table: {source_data}")
 
@@ -164,12 +188,11 @@ def main() -> None:
     copy_input_subset(source_data, destination_input, args.n_objects)
 
     relative_input = os.path.relpath(destination_input, destination_run_dir)
-    destination_config.write_text(
-        replace_config_value(config_text, "data_file", relative_input),
-        encoding="utf-8",
-    )
+    updated_config = replace_config_value(config_text, "data_file", relative_input)
+    updated_config = replace_config_value(updated_config, "cores", str(args.cores))
+    destination_config.write_text(updated_config, encoding="utf-8")
     shutil.copy2(source_spec, destination_spec)
-    write_launcher(launcher, args.destination_root, run_name)
+    write_launcher(launcher, args.destination_root, run_name, args.cores)
 
     print(f"Prepared {args.n_objects:,} objects at {destination_run_dir}")
     print(f"Input: {destination_input}")
