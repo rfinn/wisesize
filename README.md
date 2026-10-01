@@ -25,8 +25,11 @@ Generated products are written outside this git repository, under:
 
 `make_wisesize_cigale_sample.py` applies the WISEsize redshift and W3 S/N
 selection, retains `INSTAR` sources by default, sorts the result by redshift,
-and writes 10,000-object CIGALE chunks plus an audit table and report. It also
-creates portable run directories using relative input paths.
+adds a 0.1 mag systematic uncertainty in quadrature to the CIGALE fitting
+errors, and writes 10,000-object chunks plus an audit table and report. The W3
+selection continues to use the original catalog errors. The script also creates
+portable run directories using relative input paths and gives error-floor runs
+a distinct `errfloor0p10mag` name so earlier outputs are preserved.
 
 On Draco, run all prepared chunks sequentially with:
 
@@ -45,7 +48,7 @@ python ~/github/wisesize/scripts/collect_cigale_chunk_results.py
 ```
 
 This writes
-`/mnt/astro/SGA-CIGALE/results/wisesize_sga2025_ap03_z0002_0025_w3snr10_results.fits`.
+`/data-pool/rfinn/SGA-CIGALE/results/wisesize_sga2025_ap03_z0002_0025_w3snr10_errfloor0p10mag_results.fits`.
 The combined table includes an explicit `SGAID` cross-match key and a
 `CIGALE_CHUNK` provenance column. The collector checks each result ID against
 the corresponding CIGALE input and stops on missing, unexpected, or duplicate

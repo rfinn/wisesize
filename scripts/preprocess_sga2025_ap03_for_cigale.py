@@ -49,6 +49,7 @@ from astropy.io import fits
 
 DEFAULT_SGA_FITS = Path("/Users/rfinn/research/SGA2025/SGA2025-v1.0.fits")
 DEFAULT_OUTPUT_DIR = Path("/Users/rfinn/research/SGA-CIGALE")
+DEFAULT_MAG_ERROR_FLOOR = 0.1
 
 DEC_Z_CUTOFF_DEG = 32.375
 NANOMAGGY_TO_MJY = 3631.0e-6
@@ -143,6 +144,15 @@ def parse_args() -> argparse.Namespace:
         help=(
             "Number of largest NEARSTAR/INSTAR galaxies to write to the review CSV. "
             f"Default: {DEFAULT_LARGE_REVIEW_LIMIT}"
+        ),
+    )
+    parser.add_argument(
+        "--mag-error-floor",
+        type=float,
+        default=DEFAULT_MAG_ERROR_FLOOR,
+        help=(
+            "Systematic magnitude uncertainty added in quadrature to each "
+            f"CIGALE flux error. Default: {DEFAULT_MAG_ERROR_FLOOR:g} mag."
         ),
     )
     return parser.parse_args()
@@ -434,8 +444,20 @@ def describe_filter_rule(rule: FilterRule) -> str:
     return f"`{rule.name}` when {' and '.join(conditions)}"
 
 
+def add_magnitude_error_floor(
+    flux: np.ndarray, error: np.ndarray, mag_error_floor: float
+) -> np.ndarray:
+    """Add a magnitude systematic to a flux-density error in quadrature."""
+    if mag_error_floor < 0.0:
+        raise ValueError("Magnitude error floor must be non-negative.")
+    fractional_floor = np.log(10.0) / 2.5 * mag_error_floor
+    return np.hypot(error, fractional_floor * np.abs(flux))
+
+
 def build_cigale_columns(
-    intermediate: dict[str, np.ndarray], filter_map: FilterMap
+    intermediate: dict[str, np.ndarray],
+    filter_map: FilterMap,
+    mag_error_floor: float = DEFAULT_MAG_ERROR_FLOOR,
 ) -> tuple[dict[str, np.ndarray], dict[str, int]]:
     use_cigale = np.asarray(intermediate["use_cigale"], dtype=bool)
     dec = np.asarray(intermediate["declination"], dtype=np.float64)[use_cigale]
@@ -449,6 +471,9 @@ def build_cigale_columns(
         lower = band.lower()
         source_flux = np.asarray(intermediate[f"flux_ap03_{lower}_mjy_corr"])[use_cigale]
         source_err = np.asarray(intermediate[f"flux_err_ap03_{lower}_mjy_corr"])[use_cigale]
+        source_err = add_magnitude_error_floor(
+            source_flux, source_err, mag_error_floor
+        )
         use_band = np.asarray(intermediate[f"use_band_{lower}"], dtype=bool)[use_cigale]
         for rule in filter_map[band]:
             use_rule = use_band & filter_rule_mask(rule, dec)
@@ -549,6 +574,7 @@ def write_report(
     filter_supplied_counts: dict[str, int] = diagnostics["filter_supplied_counts"]  # type: ignore[assignment]
     input_columns: dict[str, list[str]] = diagnostics["input_columns"]  # type: ignore[assignment]
     extinction_columns: dict[str, str] = diagnostics["extinction_columns"]  # type: ignore[assignment]
+    mag_error_floor = float(diagnostics["mag_error_floor"])
 
     lines = [
         "# SGA-2025 AP03 CIGALE Preprocessing Diagnostics",
@@ -656,6 +682,16 @@ def write_report(
                 "`flux_corrected = flux_observed * 10**(0.4 * A_lambda)`."
             ),
             "- Flux uncertainties are scaled by the same multiplicative factor.",
+            (
+                f"- CIGALE-facing uncertainties include a `{mag_error_floor:g} mag` "
+                "systematic added in quadrature: "
+                "`sigma_total^2 = sigma_formal^2 + "
+                "[(ln(10)/2.5) * sigma_mag * |flux|]^2`."
+            ),
+            (
+                "- The intermediate FITS table retains the formal catalog "
+                "uncertainties without this systematic floor."
+            ),
             "",
             "## Band-Supply Rules",
             "",
@@ -725,6 +761,8 @@ def write_report(
 
 def main() -> None:
     args = parse_args()
+    if args.mag_error_floor < 0.0:
+        raise ValueError("--mag-error-floor must be non-negative.")
     filter_map = load_filter_map(args.filter_map)
 
     input_dir = args.output_dir / "inputs"
@@ -737,8 +775,11 @@ def main() -> None:
     intermediate, diagnostics = build_intermediate_columns(
         sga, phot, sga_header, phot_header, args.sga_fits
     )
-    cigale, filter_supplied_counts = build_cigale_columns(intermediate, filter_map)
+    cigale, filter_supplied_counts = build_cigale_columns(
+        intermediate, filter_map, args.mag_error_floor
+    )
     diagnostics["filter_supplied_counts"] = filter_supplied_counts
+    diagnostics["mag_error_floor"] = args.mag_error_floor
 
     intermediate_path = intermediate_dir / "sga2025_ap03_cigale_intermediate.fits"
     cigale_path = input_dir / "sga2025_ap03_cigale_photometry.dat"

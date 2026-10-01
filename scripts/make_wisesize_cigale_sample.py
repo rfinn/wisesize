@@ -33,7 +33,8 @@ DEFAULT_W3_SNR_MIN = 10.0
 DEFAULT_CHUNK_SIZE = 10_000
 DEFAULT_CORES = 8
 DEFAULT_HIGH_AV = 3.0
-SAMPLE_STEM = "wisesize_sga2025_ap03_z0002_0025_w3snr10"
+BASE_SAMPLE_STEM = "wisesize_sga2025_ap03_z0002_0025_w3snr10"
+DEFAULT_SAMPLE_STEM = f"{BASE_SAMPLE_STEM}_errfloor0p10mag"
 
 
 def parse_args() -> argparse.Namespace:
@@ -57,6 +58,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--w3-snr-min", type=float, default=DEFAULT_W3_SNR_MIN)
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     parser.add_argument("--cores", type=int, default=DEFAULT_CORES)
+    parser.add_argument(
+        "--mag-error-floor",
+        type=float,
+        default=prep.DEFAULT_MAG_ERROR_FLOOR,
+        help=(
+            "Systematic magnitude uncertainty added in quadrature to CIGALE "
+            f"flux errors. Default: {prep.DEFAULT_MAG_ERROR_FLOOR:g} mag."
+        ),
+    )
+    parser.add_argument(
+        "--sample-stem",
+        default=DEFAULT_SAMPLE_STEM,
+        help=f"Output/run name prefix. Default: {DEFAULT_SAMPLE_STEM}.",
+    )
     parser.add_argument(
         "--model-redshift",
         type=float,
@@ -159,6 +174,7 @@ def build_cigale_columns(
     intermediate: dict[str, np.ndarray],
     selected_indices: np.ndarray,
     filter_map: prep.FilterMap,
+    mag_error_floor: float,
 ) -> tuple[dict[str, np.ndarray], dict[str, int]]:
     dec = np.asarray(intermediate["declination"], dtype=np.float64)[selected_indices]
     bands = prep.decode_fits_string_array(intermediate["bands"])[selected_indices]
@@ -178,6 +194,7 @@ def build_cigale_columns(
         error = np.asarray(
             intermediate[f"flux_err_ap03_{lower}_mjy_corr"], dtype=np.float64
         )[selected_indices]
+        error = prep.add_magnitude_error_floor(flux, error, mag_error_floor)
         usable = np.isfinite(flux) & np.isfinite(error) & (error > 0.0)
         if band in prep.OPTICAL_BANDS:
             usable &= np.char.find(bands, prep.OPTICAL_BANDS[band]) >= 0
@@ -296,6 +313,7 @@ def write_audit_table(
     details: dict[str, np.ndarray],
     selected_indices: np.ndarray,
     chunk_size: int,
+    mag_error_floor: float,
 ) -> None:
     n_selected = len(selected_indices)
     table = Table()
@@ -315,6 +333,7 @@ def write_audit_table(
         "z_min < Z < z_max and (AP01_W3_SNR > threshold or "
         "AP03_W3_SNR > threshold)"
     )
+    table.meta["MAGERRFL"] = (mag_error_floor, "CIGALE systematic floor in mag")
     table.write(path, overwrite=True)
 
 
@@ -409,6 +428,14 @@ def write_report(
             "## CIGALE Configuration",
             "",
             f"- Cores per run: {args.cores}",
+            (
+                f"- Photometric error floor: `{args.mag_error_floor:g} mag`, "
+                "added in quadrature to every supplied CIGALE flux uncertainty."
+            ),
+            (
+                "- W3 sample selection uses the original catalog uncertainties; "
+                "the systematic floor changes fitting errors, not membership."
+            ),
             f"- Added high attenuation point: `Av_ISM={args.high_av:g}`",
             "- `tau_main=1e5` is retained from the template grid.",
             "- Best-fit SED files are disabled.",
@@ -431,6 +458,10 @@ def main() -> None:
         raise ValueError("--chunk-size must be positive.")
     if args.cores < 1:
         raise ValueError("--cores must be positive.")
+    if args.mag_error_floor < 0.0:
+        raise ValueError("--mag-error-floor must be non-negative.")
+    if not args.sample_stem or Path(args.sample_stem).name != args.sample_stem:
+        raise ValueError("--sample-stem must be a non-empty filename component.")
     if not args.z_min < args.z_max:
         raise ValueError("--z-min must be less than --z-max.")
     for path in (args.sga_fits, args.intermediate_fits, args.template_config):
@@ -468,7 +499,7 @@ def main() -> None:
 
     filter_map = prep.load_filter_map(args.filter_map)
     cigale_columns, supplied_counts = build_cigale_columns(
-        intermediate, selected_indices, filter_map
+        intermediate, selected_indices, filter_map, args.mag_error_floor
     )
 
     input_dir = args.output_root / "inputs"
@@ -478,10 +509,10 @@ def main() -> None:
     for directory in (input_dir, intermediate_dir, report_dir, run_root):
         directory.mkdir(parents=True, exist_ok=True)
 
-    full_input = input_dir / f"{SAMPLE_STEM}.dat"
-    audit_path = intermediate_dir / f"{SAMPLE_STEM}_selection.fits"
-    manifest_path = report_dir / f"{SAMPLE_STEM}_chunks.csv"
-    report_path = report_dir / f"{SAMPLE_STEM}_report.md"
+    full_input = input_dir / f"{args.sample_stem}.dat"
+    audit_path = intermediate_dir / f"{args.sample_stem}_selection.fits"
+    manifest_path = report_dir / f"{args.sample_stem}_chunks.csv"
+    report_path = report_dir / f"{args.sample_stem}_report.md"
     prep.write_cigale_ascii(full_input, cigale_columns)
     write_audit_table(
         audit_path,
@@ -490,6 +521,7 @@ def main() -> None:
         details,
         selected_indices,
         args.chunk_size,
+        args.mag_error_floor,
     )
 
     manifest_rows: list[dict[str, object]] = []
@@ -497,7 +529,7 @@ def main() -> None:
     for chunk_index, start in enumerate(range(0, n_selected, args.chunk_size), start=1):
         stop = min(start + args.chunk_size, n_selected)
         chunk_columns = subset_columns(cigale_columns, start, stop)
-        chunk_name = f"{SAMPLE_STEM}_chunk{chunk_index:02d}"
+        chunk_name = f"{args.sample_stem}_chunk{chunk_index:02d}"
         chunk_input = input_dir / f"{chunk_name}.dat"
         run_dir = run_root / chunk_name
         run_dir.mkdir(parents=True, exist_ok=True)

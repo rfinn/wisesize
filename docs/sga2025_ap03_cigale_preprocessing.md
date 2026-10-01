@@ -8,6 +8,9 @@ are written under `/Users/rfinn/research/SGA-CIGALE`.
 - Preserve `/Users/rfinn/research/SGA2025/SGA2025-v1.0.fits` unchanged.
 - Use `SGA2025.SGAID` as the object identifier.
 - Use AP03 fluxes and AP03 flux uncertainties from `ELLIPSEPHOT`.
+- Preserve the formal catalog uncertainties in the intermediate FITS table.
+- Add a 0.1 mag systematic uncertainty in quadrature when writing CIGALE-facing
+  flux errors. Sample-selection S/N values continue to use the formal errors.
 - Convert nanomaggies to mJy with `1 nanomaggy = 0.003631 mJy`.
 - Correct Milky Way extinction with `SGA2025.MW_TRANSMISSION_{band}`.
 - Exclude `SAMPLE` bit `INSTAR = 16` from the first-pass CIGALE sample.
