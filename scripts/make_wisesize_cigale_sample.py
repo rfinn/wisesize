@@ -33,8 +33,8 @@ DEFAULT_W3_SNR_MIN = 10.0
 DEFAULT_CHUNK_SIZE = 10_000
 DEFAULT_CORES = 8
 DEFAULT_HIGH_AV = 3.0
-BASE_SAMPLE_STEM = "wisesize_sga2025_ap03_z0002_0025_w3snr10"
-DEFAULT_SAMPLE_STEM = f"{BASE_SAMPLE_STEM}_errfloor0p10mag"
+FIT_APERTURES = ("AP00", "AP01", "AP02", "AP03", "AP04")
+DEFAULT_FIT_APERTURE = "AP04"
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +59,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     parser.add_argument("--cores", type=int, default=DEFAULT_CORES)
     parser.add_argument(
+        "--fit-aperture",
+        type=str.upper,
+        choices=FIT_APERTURES,
+        default=DEFAULT_FIT_APERTURE,
+        help=(
+            "SGA2025 aperture used for CIGALE photometry. The WISEsize sample "
+            "selection remains based on AP01/AP03 W3 S/N. Default: AP04."
+        ),
+    )
+    parser.add_argument(
         "--mag-error-floor",
         type=float,
         default=prep.DEFAULT_MAG_ERROR_FLOOR,
@@ -69,8 +79,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--sample-stem",
-        default=DEFAULT_SAMPLE_STEM,
-        help=f"Output/run name prefix. Default: {DEFAULT_SAMPLE_STEM}.",
+        help=(
+            "Output/run name prefix. By default, derive it from the fitting "
+            "aperture and magnitude-error floor."
+        ),
     )
     parser.add_argument(
         "--model-redshift",
@@ -103,6 +115,7 @@ def safe_ratio(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
 
 def read_selection_columns(
     path: Path,
+    fit_aperture: str,
 ) -> dict[str, np.ndarray]:
     with fits.open(path, memmap=True) as hdul:
         sga = hdul[prep.SGA_EXT].data
@@ -113,7 +126,7 @@ def read_selection_columns(
         phot_ids = np.asarray(phot[prep.ID_COL], dtype=np.int64)
         if not np.array_equal(sga_ids, phot_ids):
             raise AssertionError("SGA2025 and ELLIPSEPHOT are not aligned by SGAID.")
-        return {
+        columns = {
             "SGA_ID": sga_ids,
             "redshift": np.asarray(sga[prep.REDSHIFT_COL], dtype=np.float64),
             "sample_bitmask": np.asarray(sga[prep.SAMPLE_COL], dtype=np.int64),
@@ -126,6 +139,15 @@ def read_selection_columns(
                 phot["FLUX_ERR_AP03_W3"], dtype=np.float64
             ),
         }
+        for band in prep.BANDS:
+            lower = band.lower()
+            columns[f"fit_flux_{lower}"] = np.asarray(
+                phot[f"FLUX_{fit_aperture}_{band}"], dtype=np.float64
+            )
+            columns[f"fit_err_{lower}"] = np.asarray(
+                phot[f"FLUX_ERR_{fit_aperture}_{band}"], dtype=np.float64
+            )
+        return columns
 
 
 def read_intermediate(path: Path) -> dict[str, np.ndarray]:
@@ -171,6 +193,7 @@ def build_selection(
 
 
 def build_cigale_columns(
+    source: dict[str, np.ndarray],
     intermediate: dict[str, np.ndarray],
     selected_indices: np.ndarray,
     filter_map: prep.FilterMap,
@@ -188,12 +211,20 @@ def build_cigale_columns(
 
     for band in prep.BANDS:
         lower = band.lower()
+        transmission = np.asarray(
+            intermediate[f"mw_transmission_{lower}"], dtype=np.float64
+        )[selected_indices]
+        correction = np.full(len(selected_indices), np.nan, dtype=np.float64)
+        good_transmission = np.isfinite(transmission) & (transmission > 0.0)
+        correction[good_transmission] = (
+            prep.NANOMAGGY_TO_MJY / transmission[good_transmission]
+        )
         flux = np.asarray(
-            intermediate[f"flux_ap03_{lower}_mjy_corr"], dtype=np.float64
-        )[selected_indices]
+            source[f"fit_flux_{lower}"], dtype=np.float64
+        )[selected_indices] * correction
         error = np.asarray(
-            intermediate[f"flux_err_ap03_{lower}_mjy_corr"], dtype=np.float64
-        )[selected_indices]
+            source[f"fit_err_{lower}"], dtype=np.float64
+        )[selected_indices] * correction
         error = prep.add_magnitude_error_floor(flux, error, mag_error_floor)
         usable = np.isfinite(flux) & np.isfinite(error) & (error > 0.0)
         if band in prep.OPTICAL_BANDS:
@@ -314,6 +345,7 @@ def write_audit_table(
     selected_indices: np.ndarray,
     chunk_size: int,
     mag_error_floor: float,
+    fit_aperture: str,
 ) -> None:
     n_selected = len(selected_indices)
     table = Table()
@@ -334,6 +366,7 @@ def write_audit_table(
         "AP03_W3_SNR > threshold)"
     )
     table.meta["MAGERRFL"] = (mag_error_floor, "CIGALE systematic floor in mag")
+    table.meta["FITAP"] = (fit_aperture, "SGA2025 aperture supplied to CIGALE")
     table.write(path, overwrite=True)
 
 
@@ -377,7 +410,8 @@ def write_report(
         "",
         f"Generated UTC: {datetime.now(timezone.utc).isoformat()}",
         f"Source SGA file: `{args.sga_fits}`",
-        f"AP03 intermediate file: `{args.intermediate_fits}`",
+        f"Preprocessing intermediate file: `{args.intermediate_fits}`",
+        f"CIGALE fitting photometry: `SGA2025 {args.fit_aperture}`",
         "",
         "## Selection",
         "",
@@ -418,7 +452,7 @@ def write_report(
             f"{row['z_median']} | {row['z_max']} | {row['model_redshift']} |"
         )
 
-    lines.extend(["", "## Supplied AP03 Photometry", ""])
+    lines.extend(["", f"## Supplied {args.fit_aperture} Photometry", ""])
     for name, count in supplied_counts.items():
         lines.append(f"- `{name}`: {count}")
 
@@ -440,7 +474,8 @@ def write_report(
             "- `tau_main=1e5` is retained from the template grid.",
             "- Best-fit SED files are disabled.",
             "- Raw chi-square files are disabled.",
-            "- Each input uses SGA-2025 AP03 extinction-corrected fluxes in mJy.",
+            f"- Each input uses SGA-2025 {args.fit_aperture} "
+            "extinction-corrected fluxes in mJy.",
             "",
         ]
     )
@@ -460,6 +495,12 @@ def main() -> None:
         raise ValueError("--cores must be positive.")
     if args.mag_error_floor < 0.0:
         raise ValueError("--mag-error-floor must be non-negative.")
+    if args.sample_stem is None:
+        floor_label = f"{args.mag_error_floor:.2f}".replace(".", "p")
+        args.sample_stem = (
+            f"wisesize_sga2025_{args.fit_aperture.lower()}_"
+            f"z0002_0025_w3snr10_errfloor{floor_label}mag"
+        )
     if not args.sample_stem or Path(args.sample_stem).name != args.sample_stem:
         raise ValueError("--sample-stem must be a non-empty filename component.")
     if not args.z_min < args.z_max:
@@ -471,10 +512,10 @@ def main() -> None:
     if not template_spec.is_file():
         raise FileNotFoundError(template_spec)
 
-    source = read_selection_columns(args.sga_fits)
+    source = read_selection_columns(args.sga_fits, args.fit_aperture)
     intermediate = read_intermediate(args.intermediate_fits)
     if not np.array_equal(source["SGA_ID"], intermediate["SGA_ID"]):
-        raise AssertionError("SGA source and AP03 intermediate rows are not aligned.")
+        raise AssertionError("SGA source and preprocessing rows are not aligned.")
 
     selected, details = build_selection(
         source,
@@ -499,7 +540,11 @@ def main() -> None:
 
     filter_map = prep.load_filter_map(args.filter_map)
     cigale_columns, supplied_counts = build_cigale_columns(
-        intermediate, selected_indices, filter_map, args.mag_error_floor
+        source,
+        intermediate,
+        selected_indices,
+        filter_map,
+        args.mag_error_floor,
     )
 
     input_dir = args.output_root / "inputs"
@@ -522,6 +567,7 @@ def main() -> None:
         selected_indices,
         args.chunk_size,
         args.mag_error_floor,
+        args.fit_aperture,
     )
 
     manifest_rows: list[dict[str, object]] = []

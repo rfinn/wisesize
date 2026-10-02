@@ -6,7 +6,7 @@ set -euo pipefail
 
 ROOT=${SGA_CIGALE_ROOT:-/data-pool/rfinn/SGA-CIGALE}
 PCIGALE=${PCIGALE:-pcigale}
-STEM=${CIGALE_STEM:-wisesize_sga2025_ap03_z0002_0025_w3snr10_errfloor0p10mag}
+STEM=${CIGALE_STEM:-wisesize_sga2025_ap04_z0002_0025_w3snr10_errfloor0p10mag}
 
 if [[ $# -gt 0 ]]; then
     chunks=("$@")

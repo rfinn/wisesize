@@ -12,7 +12,7 @@ from astropy.table import Column, Table, vstack
 
 
 DEFAULT_ROOT = Path("/data-pool/rfinn/SGA-CIGALE")
-DEFAULT_STEM = "wisesize_sga2025_ap03_z0002_0025_w3snr10_errfloor0p10mag"
+DEFAULT_STEM = "wisesize_sga2025_ap04_z0002_0025_w3snr10_errfloor0p10mag"
 CHUNK_RE = re.compile(r"_chunk(\d+)$")
 
 

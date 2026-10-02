@@ -31,6 +31,17 @@ selection continues to use the original catalog errors. The script also creates
 portable run directories using relative input paths and gives error-floor runs
 a distinct `errfloor0p10mag` name so earlier outputs are preserved.
 
+SGA2025 AP04 is the default fitting aperture. It is the closest match to the
+legacy AP06 aperture used for Kim Conger's Virgo CIGALE inputs. Sample membership
+still uses the original `AP01_W3` or `AP03_W3` S/N criterion. Prepare the AP04
+run on the laptop with:
+
+```bash
+python scripts/make_wisesize_cigale_sample.py
+```
+
+Use `--fit-aperture AP03` only to reproduce the earlier AP03 run.
+
 On Draco, run all prepared chunks sequentially with:
 
 ```bash
@@ -48,7 +59,7 @@ python ~/github/wisesize/scripts/collect_cigale_chunk_results.py
 ```
 
 This writes
-`/data-pool/rfinn/SGA-CIGALE/results/wisesize_sga2025_ap03_z0002_0025_w3snr10_errfloor0p10mag_results.fits`.
+`/data-pool/rfinn/SGA-CIGALE/results/wisesize_sga2025_ap04_z0002_0025_w3snr10_errfloor0p10mag_results.fits`.
 The combined table includes an explicit `SGAID` cross-match key and a
 `CIGALE_CHUNK` provenance column. The collector checks each result ID against
 the corresponding CIGALE input and stops on missing, unexpected, or duplicate
@@ -98,7 +109,9 @@ comparison, with other shared CIGALE parameters retained as secondary checks.
 The script also reads `vf_v2_environment.fits` for `Vcosmic` and decomposes
 mass/SFR offsets using the exact luminosity distance stored by each CIGALE run.
 Its raw-photometry diagnostic compares SGA2025 AP03 with legacy AP06, the
-aperture used to build Kim Conger's CIGALE input catalog.
+aperture used to build Kim Conger's CIGALE input catalog. Run
+`compare_sga2025_apertures_to_legacy_ap06.py` to compare every SGA2025 aperture;
+that test selects AP04 as the closest match.
 Outputs are written under
 `/Users/rfinn/research/SGA-CIGALE/comparisons/wisesize_vf_cigale_metallicity_20260305`.
 
