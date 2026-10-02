@@ -84,6 +84,20 @@ left-join FITS table with match and redshift-quality flags, and produces
 summary tables and plots under
 `/Users/rfinn/research/SGA-CIGALE/comparisons/wisesize_nedlvs_20250602`.
 
+Cross-check the WISEsize CIGALE results against the row-aligned Virgo Filament
+CIGALE metallicity catalog with:
+
+```bash
+python scripts/compare_wisesize_cigale_vf.py
+```
+
+This uses `vf_v2_main.fits` for coordinates and radial velocities, applies the
+same 30 arcsec positional limit, and uses `vr/c` as a secondary redshift
+confirmation. Bayesian and best-fit stellar masses and SFRs are the primary
+comparison, with other shared CIGALE parameters retained as secondary checks.
+Outputs are written under
+`/Users/rfinn/research/SGA-CIGALE/comparisons/wisesize_vf_cigale_metallicity_20260305`.
+
 ## CIGALE SLURM benchmark
 
 `make_cigale_slurm_benchmark.py` creates separate CIGALE configurations for
