@@ -97,6 +97,8 @@ confirmation. Bayesian and best-fit stellar masses and SFRs are the primary
 comparison, with other shared CIGALE parameters retained as secondary checks.
 The script also reads `vf_v2_environment.fits` for `Vcosmic` and decomposes
 mass/SFR offsets using the exact luminosity distance stored by each CIGALE run.
+Its raw-photometry diagnostic compares SGA2025 AP03 with legacy AP06, the
+aperture used to build Kim Conger's CIGALE input catalog.
 Outputs are written under
 `/Users/rfinn/research/SGA-CIGALE/comparisons/wisesize_vf_cigale_metallicity_20260305`.
 

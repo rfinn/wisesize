@@ -4,7 +4,7 @@
 The comparison is performed in two forms for the same VFID-matched objects:
 
 1. The exact mJy values supplied to CIGALE in Kim's and the SGA2025 inputs.
-2. The underlying legacy AP04 and SGA2025 AP03 measurements in nanomaggies.
+2. The underlying legacy AP06 and SGA2025 AP03 measurements in nanomaggies.
 
 Keeping both views separates changes in the aperture photometry from changes in
 Milky Way extinction corrections, uncertainty handling, and output rounding.
@@ -48,6 +48,7 @@ DEFAULT_OUTPUT_DIR = Path(
 )
 DEFAULT_DEC_CUT = 32.375
 NANOMAGGY_TO_MJY = 0.003631
+KIM_LEGACY_APERTURE = "AP06"
 
 
 BANDS = {
@@ -238,8 +239,10 @@ def build_rows(args: argparse.Namespace) -> tuple[list[dict[str, object]], dict[
             raw_band = str(config["raw"])
             raw_lower = raw_band.lower()
 
-            old_flux = float(old_row[f"FLUX_AP04_{raw_band}"])
-            old_ivar = float(old_row[f"FLUX_IVAR_AP04_{raw_band}"])
+            old_flux = float(old_row[f"FLUX_{KIM_LEGACY_APERTURE}_{raw_band}"])
+            old_ivar = float(
+                old_row[f"FLUX_IVAR_{KIM_LEGACY_APERTURE}_{raw_band}"]
+            )
             old_error = old_ivar**-0.5 if np.isfinite(old_ivar) and old_ivar > 0 else np.nan
 
             corrected_flux = float(new_raw_row[f"flux_ap03_{raw_lower}_mjy_corr"])
@@ -328,7 +331,7 @@ def make_summary(rows: list[dict[str, object]]) -> list[dict[str, object]]:
             "new_input_error_mjy",
         ),
         (
-            "raw_old_ap04_new_ap03",
+            "raw_old_ap06_new_ap03",
             "old_raw_nanomaggy",
             "new_raw_nanomaggy",
             "old_raw_error_nanomaggy",
@@ -422,8 +425,8 @@ def plot_flux_grid(
             "new_raw_nanomaggy",
             "raw_pair_valid",
         )
-        ref_label, test_label = "Legacy AP04 (nanomaggy)", "SGA2025 AP03 (nanomaggy)"
-        title = "Legacy AP04 versus SGA2025 AP03 photometry"
+        ref_label, test_label = "Legacy AP06 (nanomaggy)", "SGA2025 AP03 (nanomaggy)"
+        title = "Kim legacy AP06 versus SGA2025 AP03 photometry"
 
     colors = {"south": "#0072B2", "north": "#D55E00"}
     fig, axes = plt.subplots(3, 3, figsize=(11, 10))
@@ -487,8 +490,8 @@ def plot_delta_summary(summary: list[dict[str, object]], output_path: Path) -> N
         (axes[0], "cigale_input", "CIGALE-ready flux: SGA2025 minus Kim"),
         (
             axes[1],
-            "raw_old_ap04_new_ap03",
-            "Raw flux: SGA2025 AP03 minus legacy AP04",
+            "raw_old_ap06_new_ap03",
+            "Raw flux: SGA2025 AP03 minus Kim legacy AP06",
         ),
     ):
         for region in ("south", "north"):
@@ -546,7 +549,7 @@ def write_report(
         "",
         f"New CIGALE input: `{args.new_input}`",
         f"Kim CIGALE input: `{args.kim_input}`",
-        f"Legacy AP04 source: `{args.old_ephot}`",
+        f"Legacy AP06 source: `{args.old_ephot}`",
         f"Declination split: `{args.dec_cut:g}` degrees",
         "",
         f"Matched VFIDs: {counts['compared_vfids']} "
@@ -555,7 +558,8 @@ def write_report(
         f"{counts['legacy_centroid_matches']} / {counts['compared_vfids']}",
         "",
         "The CIGALE-input comparison uses the exact mJy values supplied to each fit. "
-        "The raw comparison uses legacy AP04 and SGA2025 AP03 nanomaggies and is "
+        "The raw comparison uses Kim's legacy AP06 and SGA2025 AP03 "
+        "nanomaggies and is "
         "restricted to bands supplied in both CIGALE inputs. Positive finite fluxes "
         "are used for logarithmic ratios. "
         "Delta magnitude is `-2.5 log10(SGA2025 / Kim-or-legacy)`, so a negative value "
@@ -566,8 +570,8 @@ def write_report(
     for comparison, heading in (
         ("cigale_input", "CIGALE-ready mJy fluxes"),
         (
-            "raw_old_ap04_new_ap03",
-            "Raw legacy AP04 versus SGA2025 AP03 nanomaggy fluxes",
+            "raw_old_ap06_new_ap03",
+            "Raw Kim legacy AP06 versus SGA2025 AP03 nanomaggy fluxes",
         ),
     ):
         lines.extend(
@@ -616,8 +620,8 @@ def main() -> None:
     )
     plot_flux_grid(
         rows,
-        args.output_dir / "raw_ap04_vs_ap03_flux_comparison.png",
-        "raw_old_ap04_new_ap03",
+        args.output_dir / "raw_ap06_vs_ap03_flux_comparison.png",
+        "raw_old_ap06_new_ap03",
     )
     plot_delta_summary(summary, args.output_dir / "delta_mag_summary.png")
     write_report(

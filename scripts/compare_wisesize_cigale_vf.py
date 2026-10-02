@@ -368,12 +368,12 @@ def write_distance_summary_csv(path: Path, rows: list[dict[str, object]]) -> Non
 
 def photometry_geometry_stats(overlap: Table) -> list[dict[str, object]]:
     rows = []
-    quantities = [("SMA", "SGA_AP03_SMA", "VF_AP04_SMA")]
+    quantities = [("SMA", "SGA_AP03_SMA", "VF_AP06_SMA")]
     quantities.extend(
         (
             band,
             f"SGA_AP03_FLUX_{band}",
-            f"VF_AP04_FLUX_{band}",
+            f"VF_AP06_FLUX_{band}",
         )
         for band in PHOTOMETRY_BANDS
     )
@@ -526,10 +526,11 @@ def write_summary_markdown(
             "## Aperture-geometry comparison",
             "",
             "These are raw nanomaggy ratios for SGA2025 AP03 divided by legacy "
-            "AP04 over the full positional overlap. They isolate the aperture "
+            "AP06 used for Kim's input over the full positional overlap. They "
+            "isolate the aperture "
             "measurement from CIGALE input corrections and model choices.",
             "",
-            "| Quantity | N | Median AP03/AP04 | Median delta mag | "
+            "| Quantity | N | Median AP03/AP06 | Median delta mag | "
             "MAD log ratio | p16 log ratio | p84 log ratio |",
             "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
@@ -725,7 +726,7 @@ def photometry_geometry_plot(
     )
     axis.axhline(0, color="black", lw=1)
     axis.set_xticks(positions, labels)
-    axis.set_ylabel("log10(SGA2025 AP03 / legacy AP04)")
+    axis.set_ylabel("log10(SGA2025 AP03 / Kim legacy AP06)")
     axis.set_xlabel("Band")
     sma = next(row for row in rows if row["quantity"] == "SMA")
     axis.text(
@@ -841,12 +842,12 @@ def main() -> None:
     )
     overlap["DISTANCE_SCALING_DELTA_DEX"] = distance_delta
     overlap["SGA_AP03_SMA"] = sga_photometry["SMA"][wisesize_index]
-    overlap["VF_AP04_SMA"] = vf_ephot["SMA_AP04"][vf_index]
+    overlap["VF_AP06_SMA"] = vf_ephot["SMA_AP06"][vf_index]
     for band in PHOTOMETRY_BANDS:
         overlap[f"SGA_AP03_FLUX_{band}"] = sga_photometry[f"FLUX_{band}"][
             wisesize_index
         ]
-        overlap[f"VF_AP04_FLUX_{band}"] = vf_ephot[f"FLUX_AP04_{band}"][
+        overlap[f"VF_AP06_FLUX_{band}"] = vf_ephot[f"FLUX_AP06_{band}"][
             vf_index
         ]
 
@@ -871,7 +872,7 @@ def main() -> None:
     overlap["WISE_CIGALE_LUMINOSITY_DISTANCE_M"].unit = u.m
     overlap["VF_CIGALE_LUMINOSITY_DISTANCE_M"].unit = u.m
     overlap["SGA_AP03_SMA"].unit = u.arcsec
-    overlap["VF_AP04_SMA"].unit = u.arcsec
+    overlap["VF_AP06_SMA"].unit = u.arcsec
 
     overlap_path = args.output_dir / "wisesize_vf_cigale_overlap.fits"
     overlap.write(overlap_path, overwrite=True)
@@ -960,7 +961,7 @@ def main() -> None:
         distance_rows,
     )
     photometry_geometry_plot(
-        args.output_dir / "ap03_ap04_photometry_geometry.png",
+        args.output_dir / "ap03_ap06_photometry_geometry.png",
         photometry_rows,
     )
     comparison_plot(
