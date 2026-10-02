@@ -95,6 +95,8 @@ This uses `vf_v2_main.fits` for coordinates and radial velocities, applies the
 same 30 arcsec positional limit, and uses `vr/c` as a secondary redshift
 confirmation. Bayesian and best-fit stellar masses and SFRs are the primary
 comparison, with other shared CIGALE parameters retained as secondary checks.
+The script also reads `vf_v2_environment.fits` for `Vcosmic` and decomposes
+mass/SFR offsets using the exact luminosity distance stored by each CIGALE run.
 Outputs are written under
 `/Users/rfinn/research/SGA-CIGALE/comparisons/wisesize_vf_cigale_metallicity_20260305`.
 

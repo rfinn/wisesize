@@ -33,6 +33,12 @@ DEFAULT_VF_CIGALE = Path(
     "/Users/rfinn/research/Virgo/tables-north/v2/"
     "vf_v2_cigale_metallicity_20260305.fits"
 )
+DEFAULT_VF_ENVIRONMENT = Path(
+    "/Users/rfinn/research/Virgo/tables-north/v2/vf_v2_environment.fits"
+)
+DEFAULT_VF_EPHOT = Path(
+    "/Users/rfinn/research/Virgo/tables-north/v2/vf_v2_legacy_ephot.fits"
+)
 DEFAULT_OUTPUT_DIR = Path(
     "/Users/rfinn/research/SGA-CIGALE/comparisons/"
     "wisesize_vf_cigale_metallicity_20260305"
@@ -94,6 +100,7 @@ SECONDARY_PARAMETERS = [
 ]
 
 PARAMETERS = PRIMARY_PARAMETERS + SECONDARY_PARAMETERS
+PHOTOMETRY_BANDS = ["FUV", "NUV", "G", "R", "Z", "W1", "W2", "W3", "W4"]
 
 
 def parse_args() -> argparse.Namespace:
@@ -104,6 +111,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--sga", type=Path, default=DEFAULT_SGA)
     parser.add_argument("--vf-main", type=Path, default=DEFAULT_VF_MAIN)
     parser.add_argument("--vf-cigale", type=Path, default=DEFAULT_VF_CIGALE)
+    parser.add_argument(
+        "--vf-environment", type=Path, default=DEFAULT_VF_ENVIRONMENT
+    )
+    parser.add_argument("--vf-ephot", type=Path, default=DEFAULT_VF_EPHOT)
     parser.add_argument("--output-dir", type=Path, default=DEFAULT_OUTPUT_DIR)
     parser.add_argument("--max-separation-arcsec", type=float, default=30.0)
     parser.add_argument(
@@ -145,17 +156,51 @@ def align_sga_to_cigale(sga_path: Path, sgaids: np.ndarray) -> dict[str, np.ndar
         }
 
 
-def validate_vf_row_alignment(vf_main: Table, vf_cigale: Table) -> None:
-    if len(vf_main) != len(vf_cigale):
+def align_sga_photometry(sga_path: Path, sgaids: np.ndarray) -> dict[str, np.ndarray]:
+    with fits.open(sga_path, memmap=True) as hdul:
+        photometry = hdul[2].data
+        catalog_ids = np.asarray(photometry["SGAID"], dtype=np.int64)
+        order = np.argsort(catalog_ids)
+        positions = np.searchsorted(catalog_ids[order], sgaids)
+        indices = order[positions]
+        if not np.all(catalog_ids[indices] == sgaids):
+            raise RuntimeError("Could not align SGA photometry rows to CIGALE SGAIDs.")
+        values = {
+            f"FLUX_{band}": np.asarray(
+                photometry[f"FLUX_AP03_{band}"][indices], dtype=float
+            )
+            for band in PHOTOMETRY_BANDS
+        }
+        values["SMA"] = np.asarray(photometry["SMA_AP03"][indices], dtype=float)
+        return values
+
+
+def validate_vf_row_alignment(
+    vf_main: Table,
+    vf_cigale: Table,
+    vf_environment: Table,
+    vf_ephot: Table,
+) -> None:
+    lengths = [len(vf_main), len(vf_cigale), len(vf_environment), len(vf_ephot)]
+    if len(set(lengths)) != 1:
         raise RuntimeError(
-            f"VF tables are not row aligned: {len(vf_main)} vs {len(vf_cigale)} rows."
+            "VF tables are not row aligned: "
+            f"main, CIGALE, environment, and ephot lengths are {lengths}."
         )
     main_ids = np.asarray(vf_main["VFID"]).astype(str)
     cigale_ids = np.asarray(vf_cigale["id"]).astype(str)
-    if not np.array_equal(main_ids, cigale_ids):
-        bad = np.flatnonzero(main_ids != cigale_ids)
+    environment_ids = np.asarray(vf_environment["VFID"]).astype(str)
+    ephot_ids = np.asarray(vf_ephot["VFID"]).astype(str)
+    aligned = (
+        (main_ids == cigale_ids)
+        & (main_ids == environment_ids)
+        & (main_ids == ephot_ids)
+    )
+    if not np.all(aligned):
+        bad = np.flatnonzero(~aligned)
         raise RuntimeError(
-            "VFID and CIGALE id are not row aligned; first mismatched rows: "
+            "VF main, CIGALE, and environment IDs are not row aligned; "
+            "first mismatched rows: "
             f"{bad[:10].tolist()}"
         )
 
@@ -269,6 +314,100 @@ def write_summary_csv(path: Path, rows: list[dict[str, object]]) -> None:
         writer.writerows(rows)
 
 
+def distance_scaling_stats(
+    quantity: str,
+    wisesize: np.ndarray,
+    vf: np.ndarray,
+    distance_delta: np.ndarray,
+    selection: np.ndarray,
+) -> dict[str, object]:
+    good = (
+        selection
+        & np.isfinite(wisesize)
+        & (wisesize > 0)
+        & np.isfinite(vf)
+        & (vf > 0)
+        & np.isfinite(distance_delta)
+    )
+    observed = np.log10(wisesize[good] / vf[good])
+    predicted = distance_delta[good]
+    corrected = observed - predicted
+
+    def robust(values: np.ndarray) -> tuple[float, float]:
+        median = float(np.median(values))
+        return median, float(np.median(np.abs(values - median)))
+
+    observed_median, observed_mad = robust(observed)
+    predicted_median, predicted_mad = robust(predicted)
+    corrected_median, corrected_mad = robust(corrected)
+    return {
+        "quantity": quantity,
+        "n": len(observed),
+        "observed_median_delta_dex": observed_median,
+        "observed_mad_dex": observed_mad,
+        "distance_median_delta_dex": predicted_median,
+        "distance_mad_dex": predicted_mad,
+        "corrected_median_delta_dex": corrected_median,
+        "corrected_mad_dex": corrected_mad,
+        "corrected_p16_delta_dex": float(np.percentile(corrected, 16)),
+        "corrected_p84_delta_dex": float(np.percentile(corrected, 84)),
+        "corrected_median_ratio": float(10**corrected_median),
+        "spearman_observed_vs_distance": float(
+            spearmanr(observed, predicted).statistic
+        ),
+    }
+
+
+def write_distance_summary_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    fieldnames = list(rows[0])
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def photometry_geometry_stats(overlap: Table) -> list[dict[str, object]]:
+    rows = []
+    quantities = [("SMA", "SGA_AP03_SMA", "VF_AP04_SMA")]
+    quantities.extend(
+        (
+            band,
+            f"SGA_AP03_FLUX_{band}",
+            f"VF_AP04_FLUX_{band}",
+        )
+        for band in PHOTOMETRY_BANDS
+    )
+    for quantity, new_name, old_name in quantities:
+        new = np.asarray(overlap[new_name], dtype=float)
+        old = np.asarray(overlap[old_name], dtype=float)
+        good = np.isfinite(new) & (new > 0) & np.isfinite(old) & (old > 0)
+        log_ratio = np.log10(new[good] / old[good])
+        median = float(np.median(log_ratio))
+        rows.append(
+            {
+                "quantity": quantity,
+                "n": len(log_ratio),
+                "median_log_ratio": median,
+                "mad_log_ratio": float(
+                    np.median(np.abs(log_ratio - median))
+                ),
+                "p16_log_ratio": float(np.percentile(log_ratio, 16)),
+                "p84_log_ratio": float(np.percentile(log_ratio, 84)),
+                "median_ratio": float(10**median),
+                "median_delta_mag": float(-2.5 * median),
+            }
+        )
+    return rows
+
+
+def write_photometry_summary_csv(path: Path, rows: list[dict[str, object]]) -> None:
+    fieldnames = list(rows[0])
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+
 def formatted(value: object) -> str:
     return "nan" if not np.isfinite(float(value)) else f"{float(value):.4g}"
 
@@ -279,6 +418,8 @@ def write_summary_markdown(
     overlap: Table,
     rows: list[dict[str, object]],
     bayes_best_rows: list[dict[str, object]],
+    distance_rows: list[dict[str, object]],
+    photometry_rows: list[dict[str, object]],
 ) -> None:
     confirmed = np.asarray(overlap["REDSHIFT_CONFIRMED"], dtype=bool)
     discordant = np.asarray(overlap["REDSHIFT_DISCORDANT"], dtype=bool)
@@ -293,6 +434,8 @@ def write_summary_markdown(
         f"SGA: `{args.sga}`",
         f"VF main: `{args.vf_main}`",
         f"VF CIGALE: `{args.vf_cigale}`",
+        f"VF environment: `{args.vf_environment}`",
+        f"VF legacy photometry: `{args.vf_ephot}`",
         "",
         "## Match diagnostics",
         "",
@@ -349,6 +492,56 @@ def write_summary_markdown(
             f"{formatted(row['median_delta'])} | {formatted(row['mad_delta'])} | "
             f"{formatted(row['p16_delta'])} | {formatted(row['p84_delta'])} | "
             f"{formatted(row['median_ratio'])} | {formatted(row['spearman_rho'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Luminosity-distance contribution",
+            "",
+            "The predicted geometry term is `2 log10(D_WISEsize/D_VF)`, using "
+            "the exact luminosity distances stored by each CIGALE run. Corrected "
+            "deltas subtract this term from log10(WISEsize/VF).",
+            "",
+            "| Quantity | N | Observed median | Distance term | Corrected median | "
+            "Corrected MAD | Corrected p16 | Corrected p84 | Corrected ratio | "
+            "Spearman observed vs distance |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in distance_rows:
+        lines.append(
+            f"| {row['quantity']} | {row['n']} | "
+            f"{formatted(row['observed_median_delta_dex'])} | "
+            f"{formatted(row['distance_median_delta_dex'])} | "
+            f"{formatted(row['corrected_median_delta_dex'])} | "
+            f"{formatted(row['corrected_mad_dex'])} | "
+            f"{formatted(row['corrected_p16_delta_dex'])} | "
+            f"{formatted(row['corrected_p84_delta_dex'])} | "
+            f"{formatted(row['corrected_median_ratio'])} | "
+            f"{formatted(row['spearman_observed_vs_distance'])} |"
+        )
+    lines.extend(
+        [
+            "",
+            "## Aperture-geometry comparison",
+            "",
+            "These are raw nanomaggy ratios for SGA2025 AP03 divided by legacy "
+            "AP04 over the full positional overlap. They isolate the aperture "
+            "measurement from CIGALE input corrections and model choices.",
+            "",
+            "| Quantity | N | Median AP03/AP04 | Median delta mag | "
+            "MAD log ratio | p16 log ratio | p84 log ratio |",
+            "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
+        ]
+    )
+    for row in photometry_rows:
+        lines.append(
+            f"| {row['quantity']} | {row['n']} | "
+            f"{formatted(row['median_ratio'])} | "
+            f"{formatted(row['median_delta_mag'])} | "
+            f"{formatted(row['mad_log_ratio'])} | "
+            f"{formatted(row['p16_log_ratio'])} | "
+            f"{formatted(row['p84_log_ratio'])} |"
         )
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
@@ -450,6 +643,103 @@ def match_diagnostics_plot(path: Path, overlap: Table, args: argparse.Namespace)
     plt.close(fig)
 
 
+def distance_scaling_plot(
+    path: Path,
+    overlap: Table,
+    distance_rows: list[dict[str, object]],
+) -> None:
+    selection = np.asarray(overlap["REDSHIFT_CONFIRMED"], dtype=bool) & np.asarray(
+        overlap["VF_CIGALE_VALID"], dtype=bool
+    )
+    distance_delta = np.asarray(overlap["DISTANCE_SCALING_DELTA_DEX"], dtype=float)
+    stats = {row["quantity"]: row for row in distance_rows}
+    fig, axes = plt.subplots(2, 2, figsize=(10, 9), constrained_layout=True)
+    for axis, parameter in zip(axes.flat, PRIMARY_PARAMETERS):
+        short = parameter["short"]
+        wisesize = np.asarray(overlap[f"WISE_CIGALE_{short}"], dtype=float)
+        vf = np.asarray(overlap[f"VF_CIGALE_{short}"], dtype=float)
+        good = (
+            selection
+            & np.isfinite(wisesize)
+            & (wisesize > 0)
+            & np.isfinite(vf)
+            & (vf > 0)
+            & np.isfinite(distance_delta)
+        )
+        observed = np.log10(wisesize[good] / vf[good])
+        predicted = distance_delta[good]
+        display = np.isfinite(observed) & np.isfinite(predicted)
+        plot_percentiles = parameter.get("plot_percentiles", (1, 99))
+        xlimits = np.percentile(predicted[display], plot_percentiles)
+        ylimits = np.percentile(observed[display], plot_percentiles)
+        lo = min(xlimits[0], ylimits[0])
+        hi = max(xlimits[1], ylimits[1])
+        axis.hexbin(
+            predicted[display],
+            observed[display],
+            gridsize=45,
+            bins="log",
+            mincnt=1,
+            cmap="viridis",
+        )
+        axis.plot([lo, hi], [lo, hi], color="black", lw=1)
+        axis.set(xlim=(lo, hi), ylim=(lo, hi))
+        axis.set_xlabel(r"Predicted $2\log_{10}(D_{WISE}/D_{VF})$")
+        axis.set_ylabel(f"Observed WISEsize - VF: {parameter['label']} [dex]")
+        row = stats[parameter["column"]]
+        axis.text(
+            0.04,
+            0.96,
+            (
+                f"observed median = {row['observed_median_delta_dex']:.3f} dex\n"
+                f"distance median = {row['distance_median_delta_dex']:.3f} dex\n"
+                f"corrected median = {row['corrected_median_delta_dex']:.3f} dex\n"
+                f"Spearman rho = {row['spearman_observed_vs_distance']:.2f}"
+            ),
+            transform=axis.transAxes,
+            va="top",
+            fontsize=9,
+            bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none"},
+        )
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
+def photometry_geometry_plot(
+    path: Path, rows: list[dict[str, object]]
+) -> None:
+    flux_rows = [row for row in rows if row["quantity"] != "SMA"]
+    labels = [str(row["quantity"]) for row in flux_rows]
+    medians = np.array([row["median_log_ratio"] for row in flux_rows])
+    lower = medians - np.array([row["p16_log_ratio"] for row in flux_rows])
+    upper = np.array([row["p84_log_ratio"] for row in flux_rows]) - medians
+    fig, axis = plt.subplots(figsize=(9, 4.5), constrained_layout=True)
+    positions = np.arange(len(labels))
+    axis.errorbar(
+        positions,
+        medians,
+        yerr=np.vstack([lower, upper]),
+        fmt="o",
+        capsize=3,
+        color="tab:blue",
+    )
+    axis.axhline(0, color="black", lw=1)
+    axis.set_xticks(positions, labels)
+    axis.set_ylabel("log10(SGA2025 AP03 / legacy AP04)")
+    axis.set_xlabel("Band")
+    sma = next(row for row in rows if row["quantity"] == "SMA")
+    axis.text(
+        0.02,
+        0.96,
+        f"Median SMA ratio = {sma['median_ratio']:.3f}",
+        transform=axis.transAxes,
+        va="top",
+        bbox={"facecolor": "white", "alpha": 0.85, "edgecolor": "none"},
+    )
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
+
+
 def main() -> None:
     args = parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
@@ -457,9 +747,12 @@ def main() -> None:
     wisesize = Table.read(args.cigale)
     sgaids = np.asarray(wisesize["SGAID"], dtype=np.int64)
     sga = align_sga_to_cigale(args.sga, sgaids)
+    sga_photometry = align_sga_photometry(args.sga, sgaids)
     vf_main = Table.read(args.vf_main)
     vf_cigale = Table.read(args.vf_cigale)
-    validate_vf_row_alignment(vf_main, vf_cigale)
+    vf_environment = Table.read(args.vf_environment)
+    vf_ephot = Table.read(args.vf_ephot)
+    validate_vf_row_alignment(vf_main, vf_cigale, vf_environment, vf_ephot)
 
     vf_index, separation, matched, candidate_count, duplicate = match_catalogs(
         sga, vf_main, args.max_separation_arcsec
@@ -503,6 +796,11 @@ def main() -> None:
     overlap["SGA_Z_REF"] = sga["Z_REF"][wisesize_index]
     overlap["VF_VR_KMS"] = vf_vr
     overlap["VF_Z_FROM_VR"] = vf_z
+    overlap["VF_VCOSMIC_KMS"] = vf_environment["Vcosmic"][vf_index]
+    overlap["VF_Z_FROM_VCOSMIC"] = (
+        np.asarray(vf_environment["Vcosmic"][vf_index], dtype=float)
+        / speed_of_light
+    )
     overlap["DELTA_Z_SGA_MINUS_VF"] = delta_z
     overlap["DELTA_V_APPROX_KMS"] = delta_z * speed_of_light
     overlap["REDSHIFT_AVAILABLE"] = redshift_available
@@ -515,6 +813,42 @@ def main() -> None:
     overlap["VF_CIGALE_REDUCED_CHI_SQUARE"] = vf_cigale[
         "best.reduced_chi_square"
     ][vf_index]
+    overlap["WISE_CIGALE_REDSHIFT"] = wisesize["best.universe.redshift"][
+        wisesize_index
+    ]
+    overlap["VF_CIGALE_REDSHIFT"] = vf_cigale["best.universe.redshift"][vf_index]
+    overlap["WISE_CIGALE_LUMINOSITY_DISTANCE_M"] = wisesize[
+        "best.universe.luminosity_distance"
+    ][wisesize_index]
+    overlap["VF_CIGALE_LUMINOSITY_DISTANCE_M"] = vf_cigale[
+        "best.universe.luminosity_distance"
+    ][vf_index]
+    wise_distance = np.asarray(
+        overlap["WISE_CIGALE_LUMINOSITY_DISTANCE_M"], dtype=float
+    )
+    vf_distance = np.asarray(
+        overlap["VF_CIGALE_LUMINOSITY_DISTANCE_M"], dtype=float
+    )
+    distance_delta = np.full(len(overlap), np.nan, dtype=float)
+    valid_distance = (
+        np.isfinite(wise_distance)
+        & (wise_distance > 0)
+        & np.isfinite(vf_distance)
+        & (vf_distance > 0)
+    )
+    distance_delta[valid_distance] = 2 * np.log10(
+        wise_distance[valid_distance] / vf_distance[valid_distance]
+    )
+    overlap["DISTANCE_SCALING_DELTA_DEX"] = distance_delta
+    overlap["SGA_AP03_SMA"] = sga_photometry["SMA"][wisesize_index]
+    overlap["VF_AP04_SMA"] = vf_ephot["SMA_AP04"][vf_index]
+    for band in PHOTOMETRY_BANDS:
+        overlap[f"SGA_AP03_FLUX_{band}"] = sga_photometry[f"FLUX_{band}"][
+            wisesize_index
+        ]
+        overlap[f"VF_AP04_FLUX_{band}"] = vf_ephot[f"FLUX_AP04_{band}"][
+            vf_index
+        ]
 
     for parameter in PARAMETERS:
         short = parameter["short"]
@@ -532,7 +866,12 @@ def main() -> None:
         overlap[name].unit = u.deg
     overlap["SEPARATION_ARCSEC"].unit = u.arcsec
     overlap["VF_VR_KMS"].unit = u.km / u.s
+    overlap["VF_VCOSMIC_KMS"].unit = u.km / u.s
     overlap["DELTA_V_APPROX_KMS"].unit = u.km / u.s
+    overlap["WISE_CIGALE_LUMINOSITY_DISTANCE_M"].unit = u.m
+    overlap["VF_CIGALE_LUMINOSITY_DISTANCE_M"].unit = u.m
+    overlap["SGA_AP03_SMA"].unit = u.arcsec
+    overlap["VF_AP04_SMA"].unit = u.arcsec
 
     overlap_path = args.output_dir / "wisesize_vf_cigale_overlap.fits"
     overlap.write(overlap_path, overwrite=True)
@@ -576,14 +915,37 @@ def main() -> None:
                 )
             )
 
+    distance_delta = np.asarray(overlap["DISTANCE_SCALING_DELTA_DEX"], dtype=float)
+    distance_rows = []
+    for parameter in PRIMARY_PARAMETERS:
+        short = parameter["short"]
+        distance_rows.append(
+            distance_scaling_stats(
+                parameter["column"],
+                np.asarray(overlap[f"WISE_CIGALE_{short}"], dtype=float),
+                np.asarray(overlap[f"VF_CIGALE_{short}"], dtype=float),
+                distance_delta,
+                primary_selection,
+            )
+        )
+    photometry_rows = photometry_geometry_stats(overlap)
+
     write_summary_csv(args.output_dir / "comparison_summary.csv", summary_rows)
     write_summary_csv(args.output_dir / "bayes_best_summary.csv", bayes_best_rows)
+    write_distance_summary_csv(
+        args.output_dir / "distance_scaling_summary.csv", distance_rows
+    )
+    write_photometry_summary_csv(
+        args.output_dir / "photometry_geometry_summary.csv", photometry_rows
+    )
     write_summary_markdown(
         args.output_dir / "comparison_summary.md",
         args,
         overlap,
         summary_rows,
         bayes_best_rows,
+        distance_rows,
+        photometry_rows,
     )
     comparison_plot(
         args.output_dir / "cigale_parameter_comparison.png",
@@ -591,6 +953,15 @@ def main() -> None:
         summary_rows,
         PRIMARY_PARAMETERS,
         (2, 2),
+    )
+    distance_scaling_plot(
+        args.output_dir / "distance_scaling_mass_sfr.png",
+        overlap,
+        distance_rows,
+    )
+    photometry_geometry_plot(
+        args.output_dir / "ap03_ap04_photometry_geometry.png",
+        photometry_rows,
     )
     comparison_plot(
         args.output_dir / "cigale_other_parameter_comparison.png",
