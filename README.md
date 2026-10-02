@@ -70,6 +70,20 @@ Use `--config-run` and `--input-file` to pair a configuration with a different
 input table for controlled timing comparisons. The generated configuration
 uses eight CIGALE workers unless `--cores` is specified.
 
+## NED-LVS comparison
+
+Compare the combined WISEsize CIGALE results with NED-LVS stellar masses and
+SFRs using a nearest-neighbor sky match with a 30 arcsec limit:
+
+```bash
+python scripts/compare_wisesize_cigale_nedlvs.py
+```
+
+The script uses SGA redshifts as a secondary match diagnostic, writes a
+left-join FITS table with match and redshift-quality flags, and produces
+summary tables and plots under
+`/Users/rfinn/research/SGA-CIGALE/comparisons/wisesize_nedlvs_20250602`.
+
 ## CIGALE SLURM benchmark
 
 `make_cigale_slurm_benchmark.py` creates separate CIGALE configurations for
