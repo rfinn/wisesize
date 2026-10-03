@@ -99,6 +99,17 @@ def parse_args() -> argparse.Namespace:
         help="High Av_ISM grid point to add if absent. Default: 3.0.",
     )
     parser.add_argument(
+        "--frac-agn-grid",
+        nargs="+",
+        type=float,
+        metavar="FRACTION",
+        help=(
+            "Replace the template skirtor2016 fracAGN grid. Values must be "
+            "unique, increasing, and between 0 and 1. By default, retain "
+            "the template grid."
+        ),
+    )
+    parser.add_argument(
         "--exclude-bright-star",
         action="store_true",
         help="Exclude SAMPLE bit 16. The default retains these sources.",
@@ -320,6 +331,7 @@ def write_run_config(
     cores: int,
     model_redshift: float,
     high_av: float,
+    frac_agn_grid: list[float] | None,
 ) -> None:
     lines = template.read_text(encoding="utf-8").splitlines(keepends=True)
     lines = replace_setting(lines, "data_file", str(data_file_relative), None)
@@ -334,6 +346,11 @@ def write_run_config(
     lines = add_grid_value(
         lines, "Av_ISM", high_av, "[[dustatt_modified_CF00]]"
     )
+    if frac_agn_grid is not None:
+        grid = ", ".join(f"{value:g}" for value in frac_agn_grid)
+        lines = replace_setting(
+            lines, "fracAGN", grid, "[[skirtor2016]]"
+        )
     destination.write_text("".join(lines), encoding="utf-8")
 
 
@@ -471,6 +488,15 @@ def write_report(
                 "the systematic floor changes fitting errors, not membership."
             ),
             f"- Added high attenuation point: `Av_ISM={args.high_av:g}`",
+            (
+                "- AGN fraction grid: `"
+                + (
+                    ", ".join(f"{value:g}" for value in args.frac_agn_grid)
+                    if args.frac_agn_grid is not None
+                    else "retained from template"
+                )
+                + "`"
+            ),
             "- `tau_main=1e5` is retained from the template grid.",
             "- Best-fit SED files are disabled.",
             "- Raw chi-square files are disabled.",
@@ -495,6 +521,12 @@ def main() -> None:
         raise ValueError("--cores must be positive.")
     if args.mag_error_floor < 0.0:
         raise ValueError("--mag-error-floor must be non-negative.")
+    if args.frac_agn_grid is not None:
+        grid = np.asarray(args.frac_agn_grid, dtype=float)
+        if not np.all(np.isfinite(grid)) or np.any((grid < 0.0) | (grid > 1.0)):
+            raise ValueError("--frac-agn-grid values must be finite and between 0 and 1.")
+        if len(np.unique(grid)) != len(grid) or np.any(np.diff(grid) <= 0.0):
+            raise ValueError("--frac-agn-grid values must be unique and increasing.")
     if args.sample_stem is None:
         floor_label = f"{args.mag_error_floor:.2f}".replace(".", "p")
         args.sample_stem = (
@@ -593,6 +625,7 @@ def main() -> None:
             args.cores,
             model_redshift,
             args.high_av,
+            args.frac_agn_grid,
         )
         shutil.copy2(template_spec, run_dir / "pcigale.ini.spec")
 
