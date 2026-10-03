@@ -15,6 +15,7 @@ matplotlib.use("Agg")
 from matplotlib import pyplot as plt
 from astropy.constants import c
 from astropy.coordinates import SkyCoord, match_coordinates_sky, search_around_sky
+from astropy.cosmology import WMAP7
 from astropy.io import fits
 from astropy.table import Table
 import astropy.units as u
@@ -572,6 +573,9 @@ def comparison_plot(
     rows: list[dict[str, object]],
     parameters: list[dict[str, object]],
     shape: tuple[int, int],
+    vf_column_suffix: str = "",
+    vf_axis_label: str = "VF CIGALE",
+    figure_title: str | None = None,
 ) -> None:
     selection = np.asarray(overlap["REDSHIFT_CONFIRMED"], dtype=bool) & np.asarray(
         overlap["VF_CIGALE_VALID"], dtype=bool
@@ -596,7 +600,10 @@ def comparison_plot(
             wisesize = np.asarray(
                 overlap[f"WISE_CIGALE_{item['short']}"], dtype=float
             )
-            vf = np.asarray(overlap[f"VF_CIGALE_{item['short']}"], dtype=float)
+            vf = np.asarray(
+                overlap[f"VF_CIGALE_{item['short']}{vf_column_suffix}"],
+                dtype=float,
+            )
             good = selection & np.isfinite(wisesize) & np.isfinite(vf)
             if item["log10"]:
                 good &= (wisesize > 0) & (vf > 0)
@@ -612,11 +619,15 @@ def comparison_plot(
         figsize=(5.2 * shape[1], 4.5 * shape[0]),
         constrained_layout=True,
     )
+    if figure_title:
+        fig.suptitle(figure_title, fontsize=14)
     axes_flat = np.atleast_1d(axes).flat
     for axis, parameter in zip(axes_flat, parameters):
         short = parameter["short"]
         wisesize = np.asarray(overlap[f"WISE_CIGALE_{short}"], dtype=float)
-        vf = np.asarray(overlap[f"VF_CIGALE_{short}"], dtype=float)
+        vf = np.asarray(
+            overlap[f"VF_CIGALE_{short}{vf_column_suffix}"], dtype=float
+        )
         good = selection & np.isfinite(wisesize) & np.isfinite(vf)
         if parameter["log10"]:
             good &= (wisesize > 0) & (vf > 0)
@@ -640,7 +651,7 @@ def comparison_plot(
         )
         axis.plot([lo, hi], [lo, hi], color="black", lw=1)
         axis.set(xlim=(lo, hi), ylim=(lo, hi))
-        axis.set_xlabel(f"{prefix}VF CIGALE {parameter['label']}")
+        axis.set_xlabel(f"{prefix}{vf_axis_label} {parameter['label']}")
         axis.set_ylabel(f"{prefix}WISEsize CIGALE {parameter['label']}")
         row = stats[parameter["column"]]
         unit = " dex" if parameter["log10"] else ""
@@ -892,6 +903,22 @@ def main() -> None:
         wise_distance[valid_distance] / vf_distance[valid_distance]
     )
     overlap["DISTANCE_SCALING_DELTA_DEX"] = distance_delta
+    vf_vr_distance = np.full(len(overlap), np.nan, dtype=float)
+    valid_vr = np.isfinite(vf_z) & (vf_z > 0)
+    vf_vr_distance[valid_vr] = WMAP7.luminosity_distance(
+        vf_z[valid_vr]
+    ).to_value(u.m)
+    overlap["VF_VR_LUMINOSITY_DISTANCE_M"] = vf_vr_distance
+    distance_scale_to_vr = np.full(len(overlap), np.nan, dtype=float)
+    valid_vr_scaling = (
+        valid_vr
+        & np.isfinite(vf_distance)
+        & (vf_distance > 0)
+    )
+    distance_scale_to_vr[valid_vr_scaling] = (
+        vf_vr_distance[valid_vr_scaling] / vf_distance[valid_vr_scaling]
+    ) ** 2
+    overlap["VF_DISTANCE_SCALING_TO_VR"] = distance_scale_to_vr
     sga_sma_column = f"SGA_{args.sga_aperture}_SMA"
     overlap[sga_sma_column] = sga_photometry["SMA"][wisesize_index]
     overlap["VF_AP06_SMA"] = vf_ephot["SMA_AP06"][vf_index]
@@ -908,12 +935,22 @@ def main() -> None:
         column = parameter["column"]
         overlap[f"WISE_CIGALE_{short}"] = wisesize[column][wisesize_index]
         overlap[f"VF_CIGALE_{short}"] = vf_cigale[column][vf_index]
+        if parameter in PRIMARY_PARAMETERS:
+            overlap[f"VF_CIGALE_{short}_VR_CORRECTED"] = (
+                np.asarray(vf_cigale[column][vf_index], dtype=float)
+                * distance_scale_to_vr
+            )
         error_column = f"{column}_err"
         if error_column in wisesize.colnames and error_column in vf_cigale.colnames:
             overlap[f"WISE_CIGALE_{short}_ERR"] = wisesize[error_column][
                 wisesize_index
             ]
             overlap[f"VF_CIGALE_{short}_ERR"] = vf_cigale[error_column][vf_index]
+            if parameter in PRIMARY_PARAMETERS:
+                overlap[f"VF_CIGALE_{short}_VR_CORRECTED_ERR"] = (
+                    np.asarray(vf_cigale[error_column][vf_index], dtype=float)
+                    * distance_scale_to_vr
+                )
 
     for name in ["SGA_RA", "SGA_DEC", "VF_RA", "VF_DEC"]:
         overlap[name].unit = u.deg
@@ -923,6 +960,7 @@ def main() -> None:
     overlap["DELTA_V_APPROX_KMS"].unit = u.km / u.s
     overlap["WISE_CIGALE_LUMINOSITY_DISTANCE_M"].unit = u.m
     overlap["VF_CIGALE_LUMINOSITY_DISTANCE_M"].unit = u.m
+    overlap["VF_VR_LUMINOSITY_DISTANCE_M"].unit = u.m
     overlap[sga_sma_column].unit = u.arcsec
     overlap["VF_AP06_SMA"].unit = u.arcsec
 
@@ -981,12 +1019,31 @@ def main() -> None:
                 primary_selection,
             )
         )
+    corrected_summary_rows = []
+    for parameter in PRIMARY_PARAMETERS:
+        short = parameter["short"]
+        corrected_summary_rows.append(
+            comparison_stats(
+                parameter["column"],
+                "redshift_confirmed_valid",
+                np.asarray(overlap[f"WISE_CIGALE_{short}"], dtype=float),
+                np.asarray(
+                    overlap[f"VF_CIGALE_{short}_VR_CORRECTED"], dtype=float
+                ),
+                primary_selection,
+                parameter["log10"],
+            )
+        )
     photometry_rows = photometry_geometry_stats(overlap, args.sga_aperture)
 
     write_summary_csv(args.output_dir / "comparison_summary.csv", summary_rows)
     write_summary_csv(args.output_dir / "bayes_best_summary.csv", bayes_best_rows)
     write_distance_summary_csv(
         args.output_dir / "distance_scaling_summary.csv", distance_rows
+    )
+    write_summary_csv(
+        args.output_dir / "comparison_vf_corrected_to_vr_summary.csv",
+        corrected_summary_rows,
     )
     write_photometry_summary_csv(
         args.output_dir / "photometry_geometry_summary.csv", photometry_rows
@@ -1006,6 +1063,16 @@ def main() -> None:
         summary_rows,
         PRIMARY_PARAMETERS,
         (2, 2),
+    )
+    comparison_plot(
+        args.output_dir / "cigale_parameter_comparison_vf_corrected_to_vr.png",
+        overlap,
+        corrected_summary_rows,
+        PRIMARY_PARAMETERS,
+        (2, 2),
+        vf_column_suffix="_VR_CORRECTED",
+        vf_axis_label="VF CIGALE corrected to vr",
+        figure_title="VF CIGALE values rescaled from Vcosmic to vr distance (WMAP7)",
     )
     distance_scaling_plot(
         args.output_dir / "distance_scaling_mass_sfr.png",
