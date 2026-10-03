@@ -109,6 +109,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--cigale", type=Path, default=DEFAULT_CIGALE)
     parser.add_argument("--sga", type=Path, default=DEFAULT_SGA)
+    parser.add_argument(
+        "--sga-aperture",
+        choices=[f"AP{number:02d}" for number in range(1, 9)],
+        default="AP03",
+        help="SGA2025 aperture used for the CIGALE input photometry.",
+    )
     parser.add_argument("--vf-main", type=Path, default=DEFAULT_VF_MAIN)
     parser.add_argument("--vf-cigale", type=Path, default=DEFAULT_VF_CIGALE)
     parser.add_argument(
@@ -156,7 +162,9 @@ def align_sga_to_cigale(sga_path: Path, sgaids: np.ndarray) -> dict[str, np.ndar
         }
 
 
-def align_sga_photometry(sga_path: Path, sgaids: np.ndarray) -> dict[str, np.ndarray]:
+def align_sga_photometry(
+    sga_path: Path, sgaids: np.ndarray, aperture: str
+) -> dict[str, np.ndarray]:
     with fits.open(sga_path, memmap=True) as hdul:
         photometry = hdul[2].data
         catalog_ids = np.asarray(photometry["SGAID"], dtype=np.int64)
@@ -167,11 +175,13 @@ def align_sga_photometry(sga_path: Path, sgaids: np.ndarray) -> dict[str, np.nda
             raise RuntimeError("Could not align SGA photometry rows to CIGALE SGAIDs.")
         values = {
             f"FLUX_{band}": np.asarray(
-                photometry[f"FLUX_AP03_{band}"][indices], dtype=float
+                photometry[f"FLUX_{aperture}_{band}"][indices], dtype=float
             )
             for band in PHOTOMETRY_BANDS
         }
-        values["SMA"] = np.asarray(photometry["SMA_AP03"][indices], dtype=float)
+        values["SMA"] = np.asarray(
+            photometry[f"SMA_{aperture}"][indices], dtype=float
+        )
         return values
 
 
@@ -366,13 +376,15 @@ def write_distance_summary_csv(path: Path, rows: list[dict[str, object]]) -> Non
         writer.writerows(rows)
 
 
-def photometry_geometry_stats(overlap: Table) -> list[dict[str, object]]:
+def photometry_geometry_stats(
+    overlap: Table, aperture: str
+) -> list[dict[str, object]]:
     rows = []
-    quantities = [("SMA", "SGA_AP03_SMA", "VF_AP06_SMA")]
+    quantities = [("SMA", f"SGA_{aperture}_SMA", "VF_AP06_SMA")]
     quantities.extend(
         (
             band,
-            f"SGA_AP03_FLUX_{band}",
+            f"SGA_{aperture}_FLUX_{band}",
             f"VF_AP06_FLUX_{band}",
         )
         for band in PHOTOMETRY_BANDS
@@ -525,12 +537,14 @@ def write_summary_markdown(
             "",
             "## Aperture-geometry comparison",
             "",
-            "These are raw nanomaggy ratios for SGA2025 AP03 divided by legacy "
+            f"These are raw nanomaggy ratios for SGA2025 {args.sga_aperture} "
+            "divided by legacy "
             "AP06 used for Kim's input over the full positional overlap. They "
             "isolate the aperture "
             "measurement from CIGALE input corrections and model choices.",
             "",
-            "| Quantity | N | Median AP03/AP06 | Median delta mag | "
+            f"| Quantity | N | Median {args.sga_aperture}/AP06 | "
+            "Median delta mag | "
             "MAD log ratio | p16 log ratio | p84 log ratio |",
             "| --- | ---: | ---: | ---: | ---: | ---: | ---: |",
         ]
@@ -707,7 +721,7 @@ def distance_scaling_plot(
 
 
 def photometry_geometry_plot(
-    path: Path, rows: list[dict[str, object]]
+    path: Path, rows: list[dict[str, object]], aperture: str
 ) -> None:
     flux_rows = [row for row in rows if row["quantity"] != "SMA"]
     labels = [str(row["quantity"]) for row in flux_rows]
@@ -726,7 +740,7 @@ def photometry_geometry_plot(
     )
     axis.axhline(0, color="black", lw=1)
     axis.set_xticks(positions, labels)
-    axis.set_ylabel("log10(SGA2025 AP03 / Kim legacy AP06)")
+    axis.set_ylabel(f"log10(SGA2025 {aperture} / Kim legacy AP06)")
     axis.set_xlabel("Band")
     sma = next(row for row in rows if row["quantity"] == "SMA")
     axis.text(
@@ -748,7 +762,7 @@ def main() -> None:
     wisesize = Table.read(args.cigale)
     sgaids = np.asarray(wisesize["SGAID"], dtype=np.int64)
     sga = align_sga_to_cigale(args.sga, sgaids)
-    sga_photometry = align_sga_photometry(args.sga, sgaids)
+    sga_photometry = align_sga_photometry(args.sga, sgaids, args.sga_aperture)
     vf_main = Table.read(args.vf_main)
     vf_cigale = Table.read(args.vf_cigale)
     vf_environment = Table.read(args.vf_environment)
@@ -841,12 +855,13 @@ def main() -> None:
         wise_distance[valid_distance] / vf_distance[valid_distance]
     )
     overlap["DISTANCE_SCALING_DELTA_DEX"] = distance_delta
-    overlap["SGA_AP03_SMA"] = sga_photometry["SMA"][wisesize_index]
+    sga_sma_column = f"SGA_{args.sga_aperture}_SMA"
+    overlap[sga_sma_column] = sga_photometry["SMA"][wisesize_index]
     overlap["VF_AP06_SMA"] = vf_ephot["SMA_AP06"][vf_index]
     for band in PHOTOMETRY_BANDS:
-        overlap[f"SGA_AP03_FLUX_{band}"] = sga_photometry[f"FLUX_{band}"][
-            wisesize_index
-        ]
+        overlap[f"SGA_{args.sga_aperture}_FLUX_{band}"] = sga_photometry[
+            f"FLUX_{band}"
+        ][wisesize_index]
         overlap[f"VF_AP06_FLUX_{band}"] = vf_ephot[f"FLUX_AP06_{band}"][
             vf_index
         ]
@@ -871,7 +886,7 @@ def main() -> None:
     overlap["DELTA_V_APPROX_KMS"].unit = u.km / u.s
     overlap["WISE_CIGALE_LUMINOSITY_DISTANCE_M"].unit = u.m
     overlap["VF_CIGALE_LUMINOSITY_DISTANCE_M"].unit = u.m
-    overlap["SGA_AP03_SMA"].unit = u.arcsec
+    overlap[sga_sma_column].unit = u.arcsec
     overlap["VF_AP06_SMA"].unit = u.arcsec
 
     overlap_path = args.output_dir / "wisesize_vf_cigale_overlap.fits"
@@ -929,7 +944,7 @@ def main() -> None:
                 primary_selection,
             )
         )
-    photometry_rows = photometry_geometry_stats(overlap)
+    photometry_rows = photometry_geometry_stats(overlap, args.sga_aperture)
 
     write_summary_csv(args.output_dir / "comparison_summary.csv", summary_rows)
     write_summary_csv(args.output_dir / "bayes_best_summary.csv", bayes_best_rows)
@@ -961,8 +976,9 @@ def main() -> None:
         distance_rows,
     )
     photometry_geometry_plot(
-        args.output_dir / "ap03_ap06_photometry_geometry.png",
+        args.output_dir / f"{args.sga_aperture.lower()}_ap06_photometry_geometry.png",
         photometry_rows,
+        args.sga_aperture,
     )
     comparison_plot(
         args.output_dir / "cigale_other_parameter_comparison.png",
