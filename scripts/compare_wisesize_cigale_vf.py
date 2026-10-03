@@ -50,24 +50,29 @@ PRIMARY_PARAMETERS = [
         "column": "bayes.stellar.m_star",
         "label": r"Bayesian $M_\star$",
         "log10": True,
+        "plot_group": "stellar_mass",
     },
     {
         "short": "BEST_MSTAR",
         "column": "best.stellar.m_star",
         "label": r"best-fit $M_\star$",
         "log10": True,
+        "plot_group": "stellar_mass",
     },
     {
         "short": "SFR",
         "column": "bayes.sfh.sfr",
         "label": "Bayesian SFR",
         "log10": True,
+        "plot_group": "sfr",
+        "plot_percentiles": (2, 98),
     },
     {
         "short": "BEST_SFR",
         "column": "best.sfh.sfr",
         "label": "best-fit SFR",
         "log10": True,
+        "plot_group": "sfr",
         "plot_percentiles": (2, 98),
     },
 ]
@@ -576,6 +581,32 @@ def comparison_plot(
         for row in rows
         if row["subset"] == "redshift_confirmed_valid"
     }
+    group_limits = {}
+    for parameter in parameters:
+        group = parameter.get("plot_group", parameter["short"])
+        if group in group_limits:
+            continue
+        values = []
+        group_parameters = [
+            item
+            for item in parameters
+            if item.get("plot_group", item["short"]) == group
+        ]
+        for item in group_parameters:
+            wisesize = np.asarray(
+                overlap[f"WISE_CIGALE_{item['short']}"], dtype=float
+            )
+            vf = np.asarray(overlap[f"VF_CIGALE_{item['short']}"], dtype=float)
+            good = selection & np.isfinite(wisesize) & np.isfinite(vf)
+            if item["log10"]:
+                good &= (wisesize > 0) & (vf > 0)
+                values.extend([np.log10(wisesize[good]), np.log10(vf[good])])
+            else:
+                values.extend([wisesize[good], vf[good]])
+        percentiles = group_parameters[0].get("plot_percentiles", (0.5, 99.5))
+        limits = np.percentile(np.concatenate(values), percentiles)
+        pad = 0.05 * np.ptp(limits)
+        group_limits[group] = (limits[0] - pad, limits[1] + pad, percentiles)
     fig, axes = plt.subplots(
         *shape,
         figsize=(5.2 * shape[1], 4.5 * shape[0]),
@@ -596,11 +627,17 @@ def comparison_plot(
             x = vf[good]
             y = wisesize[good]
             prefix = ""
-        plot_percentiles = parameter.get("plot_percentiles", (0.5, 99.5))
-        limits = np.percentile(np.concatenate([x, y]), plot_percentiles)
-        pad = 0.05 * np.ptp(limits)
-        lo, hi = limits[0] - pad, limits[1] + pad
-        axis.hexbin(x, y, gridsize=45, bins="log", mincnt=1, cmap="viridis")
+        group = parameter.get("plot_group", short)
+        lo, hi, plot_percentiles = group_limits[group]
+        axis.hexbin(
+            x,
+            y,
+            gridsize=45,
+            bins="log",
+            mincnt=1,
+            cmap="viridis",
+            extent=(lo, hi, lo, hi),
+        )
         axis.plot([lo, hi], [lo, hi], color="black", lw=1)
         axis.set(xlim=(lo, hi), ylim=(lo, hi))
         axis.set_xlabel(f"{prefix}VF CIGALE {parameter['label']}")
