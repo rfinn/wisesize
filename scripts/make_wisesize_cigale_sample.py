@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build the SGA-2025 WISEsize CIGALE sample and portable run directories."""
+"""Build SGA-2025 WISEsize/parent CIGALE samples and run directories."""
 
 from __future__ import annotations
 
@@ -35,13 +35,15 @@ DEFAULT_CORES = 8
 DEFAULT_HIGH_AV = 3.0
 FIT_APERTURES = ("AP00", "AP01", "AP02", "AP03", "AP04")
 DEFAULT_FIT_APERTURE = "AP04"
+SELECTION_MODES = ("wisesize", "complement", "parent")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Select the WISEsize sample, write redshift-sorted CIGALE inputs, "
-            "and prepare portable CIGALE run directories."
+            "Select the WISEsize sample, its complement, or its redshift "
+            "parent; write redshift-sorted CIGALE inputs; and prepare portable "
+            "CIGALE run directories."
         )
     )
     parser.add_argument("--sga-fits", type=Path, default=DEFAULT_SGA_FITS)
@@ -56,6 +58,15 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--z-min", type=float, default=DEFAULT_Z_MIN)
     parser.add_argument("--z-max", type=float, default=DEFAULT_Z_MAX)
     parser.add_argument("--w3-snr-min", type=float, default=DEFAULT_W3_SNR_MIN)
+    parser.add_argument(
+        "--selection-mode",
+        choices=SELECTION_MODES,
+        default="wisesize",
+        help=(
+            "Select the W3-qualified WISEsize sample, its exact redshift-parent "
+            "complement, or the full redshift parent. Default: wisesize."
+        ),
+    )
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
     parser.add_argument("--cores", type=int, default=DEFAULT_CORES)
     parser.add_argument(
@@ -64,8 +75,8 @@ def parse_args() -> argparse.Namespace:
         choices=FIT_APERTURES,
         default=DEFAULT_FIT_APERTURE,
         help=(
-            "SGA2025 aperture used for CIGALE photometry. The WISEsize sample "
-            "selection remains based on AP01/AP03 W3 S/N. Default: AP04."
+            "SGA2025 aperture used for CIGALE photometry. W3 classification "
+            "remains based on AP01/AP03 S/N. Default: AP04."
         ),
     )
     parser.add_argument(
@@ -172,6 +183,7 @@ def build_selection(
     z_min: float,
     z_max: float,
     snr_min: float,
+    selection_mode: str,
     exclude_bright_star: bool,
 ) -> tuple[np.ndarray, dict[str, np.ndarray]]:
     snr_ap01 = safe_ratio(source["ap01_flux_w3"], source["ap01_err_w3"])
@@ -187,7 +199,15 @@ def build_selection(
         source["sample_bitmask"].astype(np.int64) & prep.NEAR_STAR_BIT_VALUE
     ) != 0
 
-    selected = zflag & (ap01_flag | ap03_flag)
+    wisesize_flag = ap01_flag | ap03_flag
+    if selection_mode == "wisesize":
+        selected = zflag & wisesize_flag
+    elif selection_mode == "complement":
+        selected = zflag & ~wisesize_flag
+    elif selection_mode == "parent":
+        selected = zflag.copy()
+    else:
+        raise ValueError(f"Unsupported selection mode: {selection_mode}")
     if exclude_bright_star:
         selected &= ~bright_star
 
@@ -196,6 +216,7 @@ def build_selection(
         "snr_ap03_w3": snr_ap03,
         "ap01_snr_flag": ap01_flag,
         "ap03_snr_flag": ap03_flag,
+        "wisesize_flag": wisesize_flag,
         "zflag": zflag,
         "bright_star": bright_star,
         "near_star": near_star,
@@ -363,6 +384,7 @@ def write_audit_table(
     chunk_size: int,
     mag_error_floor: float,
     fit_aperture: str,
+    selection_mode: str,
 ) -> None:
     n_selected = len(selected_indices)
     table = Table()
@@ -378,10 +400,19 @@ def write_audit_table(
     table["ap01_snr_flag"] = details["ap01_snr_flag"][selected_indices]
     table["ap03_snr_flag"] = details["ap03_snr_flag"][selected_indices]
     table["chunk"] = np.arange(n_selected, dtype=np.int64) // chunk_size + 1
-    table.meta["SELCRIT"] = (
-        "z_min < Z < z_max and (AP01_W3_SNR > threshold or "
-        "AP03_W3_SNR > threshold)"
-    )
+    criteria = {
+        "wisesize": (
+            "z_min < Z < z_max and (AP01_W3_SNR > threshold or "
+            "AP03_W3_SNR > threshold)"
+        ),
+        "complement": (
+            "z_min < Z < z_max and neither AP01_W3_SNR nor AP03_W3_SNR "
+            "exceeds threshold"
+        ),
+        "parent": "z_min < Z < z_max",
+    }
+    table.meta["SELMODE"] = selection_mode
+    table.meta["SELCRIT"] = criteria[selection_mode]
     table.meta["MAGERRFL"] = (mag_error_floor, "CIGALE systematic floor in mag")
     table.meta["FITAP"] = (fit_aperture, "SGA2025 aperture supplied to CIGALE")
     table.write(path, overwrite=True)
@@ -418,12 +449,23 @@ def write_report(
     zflag = details["zflag"]
     ap01_flag = details["ap01_snr_flag"]
     ap03_flag = details["ap03_snr_flag"]
+    wisesize_flag = details["wisesize_flag"]
     bright_star = details["bright_star"]
     near_star = details["near_star"]
     redshift = source["redshift"][selected_indices]
+    selection_rule = {
+        "wisesize": (
+            f"`SNR_AP01 > {args.w3_snr_min:g}` or "
+            f"`SNR_AP03 > {args.w3_snr_min:g}`"
+        ),
+        "complement": (
+            f"neither `SNR_AP01` nor `SNR_AP03` exceeds {args.w3_snr_min:g}"
+        ),
+        "parent": "redshift selection only",
+    }[args.selection_mode]
 
     lines = [
-        "# WISEsize SGA-2025 CIGALE Sample",
+        "# SGA-2025 CIGALE Sample",
         "",
         f"Generated UTC: {datetime.now(timezone.utc).isoformat()}",
         f"Source SGA file: `{args.sga_fits}`",
@@ -432,11 +474,9 @@ def write_report(
         "",
         "## Selection",
         "",
+        f"- Selection mode: `{args.selection_mode}`",
         f"- Strict redshift range: `{args.z_min} < Z < {args.z_max}`",
-        (
-            "- W3 requirement: `SNR_AP01 > "
-            f"{args.w3_snr_min:g}` or `SNR_AP03 > {args.w3_snr_min:g}`"
-        ),
+        f"- Selection rule: {selection_rule}",
         (
             "- Bright-star policy: "
             + ("excluded" if args.exclude_bright_star else "retained")
@@ -445,6 +485,8 @@ def write_report(
         f"- AP01-qualified within redshift range: {int(np.count_nonzero(zflag & ap01_flag))}",
         f"- AP03-qualified within redshift range: {int(np.count_nonzero(zflag & ap03_flag))}",
         f"- Qualified by both apertures: {int(np.count_nonzero(zflag & ap01_flag & ap03_flag))}",
+        f"- WISEsize-qualified within redshift range: {int(np.count_nonzero(zflag & wisesize_flag))}",
+        f"- W3-S/N complement within redshift range: {int(np.count_nonzero(zflag & ~wisesize_flag))}",
         f"- Final selected sample: {int(np.count_nonzero(selected))}",
         f"- Selected INSTAR sources: {int(np.count_nonzero(selected & bright_star))}",
         f"- Selected NEARSTAR sources: {int(np.count_nonzero(selected & near_star))}",
@@ -529,10 +571,20 @@ def main() -> None:
             raise ValueError("--frac-agn-grid values must be unique and increasing.")
     if args.sample_stem is None:
         floor_label = f"{args.mag_error_floor:.2f}".replace(".", "p")
-        args.sample_stem = (
-            f"wisesize_sga2025_{args.fit_aperture.lower()}_"
-            f"z0002_0025_w3snr10_errfloor{floor_label}mag"
-        )
+        if args.selection_mode == "wisesize":
+            args.sample_stem = (
+                f"wisesize_sga2025_{args.fit_aperture.lower()}_"
+                f"z0002_0025_w3snr10_errfloor{floor_label}mag"
+            )
+        else:
+            selection_label = {
+                "complement": "w3snr10_complement",
+                "parent": "parent",
+            }[args.selection_mode]
+            args.sample_stem = (
+                f"sga2025_{args.fit_aperture.lower()}_z0002_0025_"
+                f"{selection_label}_errfloor{floor_label}mag"
+            )
     if not args.sample_stem or Path(args.sample_stem).name != args.sample_stem:
         raise ValueError("--sample-stem must be a non-empty filename component.")
     if not args.z_min < args.z_max:
@@ -554,6 +606,7 @@ def main() -> None:
         args.z_min,
         args.z_max,
         args.w3_snr_min,
+        args.selection_mode,
         args.exclude_bright_star,
     )
     selected_indices = np.flatnonzero(selected)
@@ -561,7 +614,7 @@ def main() -> None:
         np.argsort(source["redshift"][selected_indices], kind="stable")
     ]
     if not len(selected_indices):
-        raise RuntimeError("The WISEsize selection is empty.")
+        raise RuntimeError(f"The {args.selection_mode} selection is empty.")
 
     if args.model_redshift is None:
         model_redshift = float(
@@ -600,6 +653,7 @@ def main() -> None:
         args.chunk_size,
         args.mag_error_floor,
         args.fit_aperture,
+        args.selection_mode,
     )
 
     manifest_rows: list[dict[str, object]] = []
