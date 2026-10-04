@@ -35,15 +35,15 @@ DEFAULT_CORES = 8
 DEFAULT_HIGH_AV = 3.0
 FIT_APERTURES = ("AP00", "AP01", "AP02", "AP03", "AP04")
 DEFAULT_FIT_APERTURE = "AP04"
-SELECTION_MODES = ("wisesize", "complement", "parent")
+SELECTION_MODES = ("wisesize", "complement", "parent", "shell")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Select the WISEsize sample, its complement, or its redshift "
-            "parent; write redshift-sorted CIGALE inputs; and prepare portable "
-            "CIGALE run directories."
+            "Select the WISEsize sample, its complement, its redshift parent, "
+            "or a redshift shell; write redshift-sorted CIGALE inputs; and "
+            "prepare portable CIGALE run directories."
         )
     )
     parser.add_argument("--sga-fits", type=Path, default=DEFAULT_SGA_FITS)
@@ -64,8 +64,9 @@ def parse_args() -> argparse.Namespace:
         default="wisesize",
         help=(
             "Select the existing W3-qualified WISEsize sample, its exact "
-            "complement within the finite nonzero Z < z_max parent, or that "
-            "full parent. Default: wisesize."
+            "complement within the finite nonzero Z < z_max parent, that full "
+            "parent, or the inclusive-lower-bound redshift shell. Default: "
+            "wisesize."
         ),
     )
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
@@ -199,6 +200,9 @@ def build_selection(
     ap03_flag = snr_ap03 > snr_min
     redshift = source["redshift"]
     zflag = np.isfinite(redshift) & (redshift > z_min) & (redshift < z_max)
+    shell_zflag = (
+        np.isfinite(redshift) & (redshift >= z_min) & (redshift < z_max)
+    )
     parent_zflag = np.isfinite(redshift) & (redshift != 0.0) & (redshift < z_max)
     bright_star = (
         source["sample_bitmask"].astype(np.int64) & prep.BRIGHT_STAR_BIT_VALUE
@@ -215,6 +219,8 @@ def build_selection(
         selected = parent_zflag & ~wisesize_flag
     elif selection_mode == "parent":
         selected = parent_zflag.copy()
+    elif selection_mode == "shell":
+        selected = shell_zflag.copy()
     else:
         raise ValueError(f"Unsupported selection mode: {selection_mode}")
     if exclude_bright_star:
@@ -228,6 +234,7 @@ def build_selection(
         "w3_snr_flag": w3_snr_flag,
         "wisesize_flag": wisesize_flag,
         "zflag": zflag,
+        "shell_zflag": shell_zflag,
         "parent_zflag": parent_zflag,
         "bright_star": bright_star,
         "near_star": near_star,
@@ -469,6 +476,7 @@ def write_audit_table(
             "z_max W3-qualified WISEsize sample"
         ),
         "parent": "finite nonzero Z < z_max",
+        "shell": "finite z_min <= Z < z_max",
     }
     table.meta["SELMODE"] = selection_mode
     table.meta["SELCRIT"] = criteria[selection_mode]
@@ -506,6 +514,7 @@ def write_report(
     manifest_rows: list[dict[str, object]],
 ) -> None:
     zflag = details["zflag"]
+    shell_zflag = details["shell_zflag"]
     parent_zflag = details["parent_zflag"]
     ap01_flag = details["ap01_snr_flag"]
     ap03_flag = details["ap03_snr_flag"]
@@ -514,6 +523,12 @@ def write_report(
     bright_star = details["bright_star"]
     near_star = details["near_star"]
     redshift = source["redshift"][selected_indices]
+    range_flag = shell_zflag if args.selection_mode == "shell" else zflag
+    range_rule = (
+        f"`{args.z_min} <= Z < {args.z_max}`"
+        if args.selection_mode == "shell"
+        else f"`{args.z_min} < Z < {args.z_max}`"
+    )
     selection_rule = {
         "wisesize": (
             f"`SNR_AP01 > {args.w3_snr_min:g}` or "
@@ -524,7 +539,24 @@ def write_report(
             f"{args.z_max:g}` and absent from the existing WISEsize selection"
         ),
         "parent": f"finite nonzero `Z < {args.z_max:g}`",
+        "shell": f"finite `{args.z_min:g} <= Z < {args.z_max:g}`",
     }[args.selection_mode]
+
+    sample_counts = [
+        f"- Requested-range sources: {int(np.count_nonzero(range_flag))}",
+        f"- AP01-qualified within requested range: {int(np.count_nonzero(range_flag & ap01_flag))}",
+        f"- AP03-qualified within requested range: {int(np.count_nonzero(range_flag & ap03_flag))}",
+        f"- Qualified by both apertures: {int(np.count_nonzero(range_flag & ap01_flag & ap03_flag))}",
+        f"- W3-qualified within requested range: {int(np.count_nonzero(range_flag & w3_snr_flag))}",
+    ]
+    if args.selection_mode != "shell":
+        sample_counts.extend(
+            [
+                f"- Existing WISEsize sample: {int(np.count_nonzero(wisesize_flag))}",
+                f"- W3-S/N complement within existing range: {int(np.count_nonzero(zflag & ~w3_snr_flag))}",
+                f"- Exact fill-in complement: {int(np.count_nonzero(parent_zflag & ~wisesize_flag))}",
+            ]
+        )
 
     lines = [
         "# SGA-2025 CIGALE Sample",
@@ -537,24 +569,15 @@ def write_report(
         "## Selection",
         "",
         f"- Selection mode: `{args.selection_mode}`",
-        (
-            "- Existing WISEsize redshift range: "
-            f"`{args.z_min} < Z < {args.z_max}`"
-        ),
+        f"- Requested redshift range: {range_rule}",
         f"- Complete-parent redshift rule: finite, nonzero `Z < {args.z_max}`",
         f"- Selection rule: {selection_rule}",
         (
             "- Bright-star policy: "
             + ("excluded" if args.exclude_bright_star else "retained")
         ),
-        f"- Existing-range sources: {int(np.count_nonzero(zflag))}",
         f"- Complete-parent sources: {int(np.count_nonzero(parent_zflag))}",
-        f"- AP01-qualified within redshift range: {int(np.count_nonzero(zflag & ap01_flag))}",
-        f"- AP03-qualified within redshift range: {int(np.count_nonzero(zflag & ap03_flag))}",
-        f"- Qualified by both apertures: {int(np.count_nonzero(zflag & ap01_flag & ap03_flag))}",
-        f"- Existing WISEsize sample: {int(np.count_nonzero(wisesize_flag))}",
-        f"- W3-S/N complement within existing range: {int(np.count_nonzero(zflag & ~w3_snr_flag))}",
-        f"- Exact fill-in complement: {int(np.count_nonzero(parent_zflag & ~wisesize_flag))}",
+        *sample_counts,
         f"- Final selected sample: {int(np.count_nonzero(selected))}",
         f"- Selected negative-redshift sources: {int(np.count_nonzero(selected & (source['redshift'] < 0.0)))}",
         f"- Selected sources with Z < -0.003: {int(np.count_nonzero(selected & (source['redshift'] < -0.003)))}",
@@ -655,9 +678,14 @@ def main() -> None:
             selection_label = {
                 "complement": "w3snr10_complement",
                 "parent": "parent",
+                "shell": "shell",
             }[args.selection_mode]
+            z_label = (
+                f"z{int(round(args.z_min * 1000)):04d}_"
+                f"{int(round(args.z_max * 1000)):04d}"
+            )
             args.sample_stem = (
-                f"sga2025_{args.fit_aperture.lower()}_z0002_0025_"
+                f"sga2025_{args.fit_aperture.lower()}_{z_label}_"
                 f"{selection_label}_errfloor{floor_label}mag"
             )
     if not args.sample_stem or Path(args.sample_stem).name != args.sample_stem:
