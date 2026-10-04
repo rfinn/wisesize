@@ -63,8 +63,9 @@ def parse_args() -> argparse.Namespace:
         choices=SELECTION_MODES,
         default="wisesize",
         help=(
-            "Select the W3-qualified WISEsize sample, its exact redshift-parent "
-            "complement, or the full redshift parent. Default: wisesize."
+            "Select the existing W3-qualified WISEsize sample, its exact "
+            "complement within the finite nonzero Z < z_max parent, or that "
+            "full parent. Default: wisesize."
         ),
     )
     parser.add_argument("--chunk-size", type=int, default=DEFAULT_CHUNK_SIZE)
@@ -151,6 +152,12 @@ def read_selection_columns(
         columns = {
             "SGA_ID": sga_ids,
             "redshift": np.asarray(sga[prep.REDSHIFT_COL], dtype=np.float64),
+            "redshift_cosmo": np.asarray(sga["Z_COSMO"], dtype=np.float64),
+            "distance_mpc": np.asarray(sga["DIST"], dtype=np.float64),
+            "redshift_ref": np.array(sga["Z_REF"]),
+            "redshift_flag": np.asarray(sga["Z_FLAG"], dtype=np.int64),
+            "distance_ref": np.array(sga["DIST_REF"]),
+            "distance_method": np.array(sga["DIST_METHOD"]),
             "sample_bitmask": np.asarray(sga[prep.SAMPLE_COL], dtype=np.int64),
             "ap01_flux_w3": np.asarray(phot["FLUX_AP01_W3"], dtype=np.float64),
             "ap01_err_w3": np.asarray(
@@ -192,6 +199,7 @@ def build_selection(
     ap03_flag = snr_ap03 > snr_min
     redshift = source["redshift"]
     zflag = np.isfinite(redshift) & (redshift > z_min) & (redshift < z_max)
+    parent_zflag = np.isfinite(redshift) & (redshift != 0.0) & (redshift < z_max)
     bright_star = (
         source["sample_bitmask"].astype(np.int64) & prep.BRIGHT_STAR_BIT_VALUE
     ) != 0
@@ -199,13 +207,14 @@ def build_selection(
         source["sample_bitmask"].astype(np.int64) & prep.NEAR_STAR_BIT_VALUE
     ) != 0
 
-    wisesize_flag = ap01_flag | ap03_flag
+    w3_snr_flag = ap01_flag | ap03_flag
+    wisesize_flag = zflag & w3_snr_flag
     if selection_mode == "wisesize":
-        selected = zflag & wisesize_flag
+        selected = wisesize_flag.copy()
     elif selection_mode == "complement":
-        selected = zflag & ~wisesize_flag
+        selected = parent_zflag & ~wisesize_flag
     elif selection_mode == "parent":
-        selected = zflag.copy()
+        selected = parent_zflag.copy()
     else:
         raise ValueError(f"Unsupported selection mode: {selection_mode}")
     if exclude_bright_star:
@@ -216,8 +225,10 @@ def build_selection(
         "snr_ap03_w3": snr_ap03,
         "ap01_snr_flag": ap01_flag,
         "ap03_snr_flag": ap03_flag,
+        "w3_snr_flag": w3_snr_flag,
         "wisesize_flag": wisesize_flag,
         "zflag": zflag,
+        "parent_zflag": parent_zflag,
         "bright_star": bright_star,
         "near_star": near_star,
     }
@@ -233,12 +244,39 @@ def build_cigale_columns(
 ) -> tuple[dict[str, np.ndarray], dict[str, int]]:
     dec = np.asarray(intermediate["declination"], dtype=np.float64)[selected_indices]
     bands = prep.decode_fits_string_array(intermediate["bands"])[selected_indices]
+    observed_redshift = np.asarray(source["redshift"], dtype=np.float64)[
+        selected_indices
+    ]
+    fit_redshift = observed_redshift.copy()
+    distance = np.full(len(selected_indices), np.nan, dtype=np.float64)
+    negative_redshift = observed_redshift < 0.0
+    if np.any(negative_redshift):
+        redshift_cosmo = np.asarray(source["redshift_cosmo"], dtype=np.float64)[
+            selected_indices
+        ]
+        source_distance = np.asarray(source["distance_mpc"], dtype=np.float64)[
+            selected_indices
+        ]
+        valid_nearby = (
+            np.isfinite(redshift_cosmo)
+            & (redshift_cosmo > 0.0)
+            & np.isfinite(source_distance)
+            & (source_distance > 0.0)
+        )
+        if not np.all(valid_nearby[negative_redshift]):
+            raise ValueError(
+                "Every negative observed redshift requires positive finite "
+                "SGA Z_COSMO and DIST values."
+            )
+        fit_redshift[negative_redshift] = redshift_cosmo[negative_redshift]
+        distance[negative_redshift] = source_distance[negative_redshift]
+
     columns: dict[str, np.ndarray] = {
         "id": np.asarray(intermediate["SGA_ID"], dtype=np.int64)[selected_indices],
-        "redshift": np.asarray(
-            intermediate["redshift_sga_z"], dtype=np.float64
-        )[selected_indices],
+        "redshift": fit_redshift,
     }
+    if np.any(negative_redshift):
+        columns["distance"] = distance
     supplied_counts: dict[str, int] = {}
 
     for band in prep.BANDS:
@@ -391,6 +429,27 @@ def write_audit_table(
     table["SGA_ID"] = source["SGA_ID"][selected_indices]
     table["source_row"] = selected_indices
     table["redshift"] = source["redshift"][selected_indices]
+    table["redshift_cosmo"] = source["redshift_cosmo"][selected_indices]
+    table["distance_mpc"] = source["distance_mpc"][selected_indices]
+    table["redshift_ref"] = prep.decode_fits_string_array(
+        source["redshift_ref"]
+    )[selected_indices]
+    table["redshift_flag"] = source["redshift_flag"][selected_indices]
+    table["distance_ref"] = prep.decode_fits_string_array(
+        source["distance_ref"]
+    )[selected_indices]
+    table["distance_method"] = prep.decode_fits_string_array(
+        source["distance_method"]
+    )[selected_indices]
+    negative_redshift = table["redshift"] < 0.0
+    table["negative_redshift"] = negative_redshift
+    table["extreme_negative_redshift"] = table["redshift"] < -0.003
+    table["cigale_redshift"] = np.where(
+        negative_redshift, table["redshift_cosmo"], table["redshift"]
+    )
+    table["cigale_distance_mpc"] = np.where(
+        negative_redshift, table["distance_mpc"], np.nan
+    )
     table["declination"] = intermediate["declination"][selected_indices]
     table["sample_bitmask"] = source["sample_bitmask"][selected_indices]
     table["near_star"] = details["near_star"][selected_indices]
@@ -406,10 +465,10 @@ def write_audit_table(
             "AP03_W3_SNR > threshold)"
         ),
         "complement": (
-            "z_min < Z < z_max and neither AP01_W3_SNR nor AP03_W3_SNR "
-            "exceeds threshold"
+            "finite nonzero Z < z_max excluding the existing z_min < Z < "
+            "z_max W3-qualified WISEsize sample"
         ),
-        "parent": "z_min < Z < z_max",
+        "parent": "finite nonzero Z < z_max",
     }
     table.meta["SELMODE"] = selection_mode
     table.meta["SELCRIT"] = criteria[selection_mode]
@@ -447,8 +506,10 @@ def write_report(
     manifest_rows: list[dict[str, object]],
 ) -> None:
     zflag = details["zflag"]
+    parent_zflag = details["parent_zflag"]
     ap01_flag = details["ap01_snr_flag"]
     ap03_flag = details["ap03_snr_flag"]
+    w3_snr_flag = details["w3_snr_flag"]
     wisesize_flag = details["wisesize_flag"]
     bright_star = details["bright_star"]
     near_star = details["near_star"]
@@ -459,9 +520,10 @@ def write_report(
             f"`SNR_AP03 > {args.w3_snr_min:g}`"
         ),
         "complement": (
-            f"neither `SNR_AP01` nor `SNR_AP03` exceeds {args.w3_snr_min:g}"
+            "finite nonzero `Z < "
+            f"{args.z_max:g}` and absent from the existing WISEsize selection"
         ),
-        "parent": "redshift selection only",
+        "parent": f"finite nonzero `Z < {args.z_max:g}`",
     }[args.selection_mode]
 
     lines = [
@@ -475,19 +537,27 @@ def write_report(
         "## Selection",
         "",
         f"- Selection mode: `{args.selection_mode}`",
-        f"- Strict redshift range: `{args.z_min} < Z < {args.z_max}`",
+        (
+            "- Existing WISEsize redshift range: "
+            f"`{args.z_min} < Z < {args.z_max}`"
+        ),
+        f"- Complete-parent redshift rule: finite, nonzero `Z < {args.z_max}`",
         f"- Selection rule: {selection_rule}",
         (
             "- Bright-star policy: "
             + ("excluded" if args.exclude_bright_star else "retained")
         ),
-        f"- Redshift-qualified sources: {int(np.count_nonzero(zflag))}",
+        f"- Existing-range sources: {int(np.count_nonzero(zflag))}",
+        f"- Complete-parent sources: {int(np.count_nonzero(parent_zflag))}",
         f"- AP01-qualified within redshift range: {int(np.count_nonzero(zflag & ap01_flag))}",
         f"- AP03-qualified within redshift range: {int(np.count_nonzero(zflag & ap03_flag))}",
         f"- Qualified by both apertures: {int(np.count_nonzero(zflag & ap01_flag & ap03_flag))}",
-        f"- WISEsize-qualified within redshift range: {int(np.count_nonzero(zflag & wisesize_flag))}",
-        f"- W3-S/N complement within redshift range: {int(np.count_nonzero(zflag & ~wisesize_flag))}",
+        f"- Existing WISEsize sample: {int(np.count_nonzero(wisesize_flag))}",
+        f"- W3-S/N complement within existing range: {int(np.count_nonzero(zflag & ~w3_snr_flag))}",
+        f"- Exact fill-in complement: {int(np.count_nonzero(parent_zflag & ~wisesize_flag))}",
         f"- Final selected sample: {int(np.count_nonzero(selected))}",
+        f"- Selected negative-redshift sources: {int(np.count_nonzero(selected & (source['redshift'] < 0.0)))}",
+        f"- Selected sources with Z < -0.003: {int(np.count_nonzero(selected & (source['redshift'] < -0.003)))}",
         f"- Selected INSTAR sources: {int(np.count_nonzero(selected & bright_star))}",
         f"- Selected NEARSTAR sources: {int(np.count_nonzero(selected & near_star))}",
         "",
@@ -544,6 +614,11 @@ def write_report(
             "- Raw chi-square files are disabled.",
             f"- Each input uses SGA-2025 {args.fit_aperture} "
             "extinction-corrected fluxes in mJy.",
+            (
+                "- Objects with negative measured `Z` use SGA `Z_COSMO` and "
+                "explicit `DIST` in the CIGALE input; measured `Z` and "
+                "provenance remain in the audit table."
+            ),
             "",
         ]
     )
@@ -683,7 +758,9 @@ def main() -> None:
         )
         shutil.copy2(template_spec, run_dir / "pcigale.ini.spec")
 
-        chunk_z = np.asarray(chunk_columns["redshift"], dtype=np.float64)
+        chunk_z = np.asarray(
+            source["redshift"][selected_indices[start:stop]], dtype=np.float64
+        )
         manifest_rows.append(
             {
                 "chunk": chunk_index,
