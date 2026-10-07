@@ -227,9 +227,12 @@ def _plot_relations(
     bins: int,
     trend_bins: int,
     cmap: str,
+    show_trend: bool,
 ) -> tuple[plt.Figure, np.ndarray]:
-    if bins < 10 or trend_bins < 4:
-        raise ValueError("bins must be >=10 and trend_bins must be >=4.")
+    if bins < 10:
+        raise ValueError("bins must be >=10.")
+    if show_trend and trend_bins < 4:
+        raise ValueError("trend_bins must be >=4 when show_trend is true.")
 
     panel_data = []
     max_count = 1.0
@@ -266,17 +269,18 @@ def _plot_relations(
             norm=norm,
             shading="auto",
         )
-        trend_edges = np.linspace(x_edges[0], x_edges[-1], trend_bins + 1)
-        centers, medians = _binned_median(x, y, trend_edges)
-        good = np.isfinite(medians)
-        ax.plot(
-            centers[good],
-            medians[good],
-            color="white",
-            marker="o",
-            markersize=3.0,
-            linewidth=2.0,
-        )
+        if show_trend:
+            trend_edges = np.linspace(x_edges[0], x_edges[-1], trend_bins + 1)
+            centers, medians = _binned_median(x, y, trend_edges)
+            good = np.isfinite(medians)
+            ax.plot(
+                centers[good],
+                medians[good],
+                color="white",
+                marker="o",
+                markersize=3.0,
+                linewidth=2.0,
+            )
         rho, _ = spearmanr(x, y)
         ax.text(
             0.04,
@@ -304,9 +308,12 @@ def plot_physical_summary(
     bins: int = 60,
     trend_bins: int = 12,
     cmap: str = "viridis",
+    show_trend: bool = False,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot six physical-property relations from the Bayes estimates."""
-    return _plot_relations(parameters, PHYSICAL_RELATIONS, bins, trend_bins, cmap)
+    return _plot_relations(
+        parameters, PHYSICAL_RELATIONS, bins, trend_bins, cmap, show_trend
+    )
 
 
 def plot_model_parameter_summary(
@@ -314,9 +321,12 @@ def plot_model_parameter_summary(
     bins: int = 60,
     trend_bins: int = 12,
     cmap: str = "magma",
+    show_trend: bool = False,
 ) -> tuple[plt.Figure, np.ndarray]:
     """Plot Bayes SFH and AGN parameters against log SFR."""
-    return _plot_relations(parameters, MODEL_RELATIONS, bins, trend_bins, cmap)
+    return _plot_relations(
+        parameters, MODEL_RELATIONS, bins, trend_bins, cmap, show_trend
+    )
 
 
 def parse_args() -> argparse.Namespace:
