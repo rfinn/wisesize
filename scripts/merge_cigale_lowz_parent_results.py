@@ -41,6 +41,8 @@ SGA_COLUMNS = (
     "Z_FLAG",
     "SAMPLE",
     "D26",
+    "BA",
+    "PA",
     "GROUP_NAME",
     "GROUP_PRIMARY",
     "GROUP_RA",

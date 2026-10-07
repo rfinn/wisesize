@@ -7,10 +7,12 @@ Notebook example
 ...     match_cigale_durbala,
 ...     plot_mstar_comparison,
 ...     plot_sfr_comparison,
+...     plot_sfr_residual_vs_axis_ratio,
 ... )
 >>> matched = match_cigale_durbala()
 >>> fig_mass, axes_mass = plot_mstar_comparison(matched)
 >>> fig_sfr, axes_sfr = plot_sfr_comparison(matched)
+>>> fig_ba, axes_ba = plot_sfr_residual_vs_axis_ratio(matched)
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ import numpy as np
 from astropy.coordinates import SkyCoord
 from astropy.table import Table
 from matplotlib.colors import LogNorm
+from scipy.stats import spearmanr
 
 
 SPEED_OF_LIGHT_KMS = 299_792.458
@@ -55,6 +58,7 @@ DURBALA_COLUMNS = (
     "DEC",
     "Vhelio",
     "Dist",
+    "expAB_r",
     "logMstarTaylor",
     "logMstarTaylor_err",
     "logMstarMcGaugh",
@@ -75,6 +79,8 @@ CIGALE_COLUMNS = (
     "Z",
     "Z_COSMO",
     "DIST",
+    "BA",
+    "PA",
     "CIGALE_SAMPLE",
     "WISESIZE_SELECTED",
     "best.reduced_chi_square",
@@ -360,6 +366,170 @@ def plot_sfr_comparison(
     )
 
 
+def _symmetric_residual_limits(
+    matched: Table,
+    limits: tuple[float, float] | None,
+) -> tuple[float, float]:
+    if limits is not None:
+        if limits[0] >= limits[1]:
+            raise ValueError("limits must be increasing.")
+        return limits
+    residuals = []
+    for cigale_column, _ in (
+        ("CIGALE_LOGSFR_BAYES", "Bayes"),
+        ("CIGALE_LOGSFR_BEST", "best"),
+    ):
+        y = np.asarray(matched[cigale_column], float)
+        for estimator, _ in SFR_ESTIMATORS:
+            x = np.asarray(matched[f"DURBALA_{estimator}"], float)
+            residual = y - x
+            residuals.append(residual[np.isfinite(residual)])
+    values = np.concatenate(residuals)
+    low, high = np.percentile(values, [2.0, 98.0])
+    bound = max(abs(low), abs(high), 0.5)
+    bound = np.ceil(bound * 2.0) / 2.0
+    return -float(bound), float(bound)
+
+
+def _binned_residual_percentiles(
+    axis_ratio: np.ndarray,
+    residual: np.ndarray,
+    edges: np.ndarray,
+    min_count: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    centers = 0.5 * (edges[:-1] + edges[1:])
+    median = np.full(len(centers), np.nan)
+    p16 = np.full(len(centers), np.nan)
+    p84 = np.full(len(centers), np.nan)
+    for index, (low, high) in enumerate(zip(edges[:-1], edges[1:])):
+        in_bin = (axis_ratio >= low) & (axis_ratio < high)
+        if index == len(centers) - 1:
+            in_bin |= axis_ratio == high
+        if np.count_nonzero(in_bin) >= min_count:
+            p16[index], median[index], p84[index] = np.percentile(
+                residual[in_bin], [16.0, 50.0, 84.0]
+            )
+    return centers, median, p16, p84
+
+
+def plot_sfr_residual_vs_axis_ratio(
+    matched: Table,
+    bins: int = 55,
+    axis_ratio_bins: int = 10,
+    min_bin_count: int = 30,
+    limits: tuple[float, float] | None = None,
+    cmap: str = "cividis",
+) -> tuple[plt.Figure, np.ndarray]:
+    """Plot CIGALE-minus-Durbala log-SFR residuals against SGA axis ratio."""
+    if bins < 5 or axis_ratio_bins < 3:
+        raise ValueError("bins must be >=5 and axis_ratio_bins must be >=3.")
+    if min_bin_count < 1:
+        raise ValueError("min_bin_count must be positive.")
+
+    residual_low, residual_high = _symmetric_residual_limits(matched, limits)
+    axis_ratio_edges = np.linspace(0.0, 1.0, axis_ratio_bins + 1)
+    density_x_edges = np.linspace(0.0, 1.0, bins + 1)
+    density_y_edges = np.linspace(residual_low, residual_high, bins + 1)
+    axis_ratio = np.asarray(matched["CIGALE_BA"], float)
+    cigale_columns = (
+        ("CIGALE_LOGSFR_BAYES", "Bayes"),
+        ("CIGALE_LOGSFR_BEST", "best"),
+    )
+    panels: dict[
+        tuple[int, int], tuple[np.ndarray, np.ndarray, np.ndarray]
+    ] = {}
+    max_count = 1.0
+    for row, (cigale_column, _) in enumerate(cigale_columns):
+        cigale_sfr = np.asarray(matched[cigale_column], float)
+        for col, (estimator, _) in enumerate(SFR_ESTIMATORS):
+            durbala_sfr = np.asarray(matched[f"DURBALA_{estimator}"], float)
+            residual = cigale_sfr - durbala_sfr
+            finite = (
+                np.isfinite(axis_ratio)
+                & (axis_ratio > 0.0)
+                & (axis_ratio <= 1.0)
+                & np.isfinite(residual)
+            )
+            x = axis_ratio[finite]
+            y = residual[finite]
+            histogram, _, _ = np.histogram2d(
+                x, y, bins=(density_x_edges, density_y_edges)
+            )
+            panels[(row, col)] = (histogram, x, y)
+            max_count = max(max_count, float(np.max(histogram)))
+
+    fig, axes = plt.subplots(
+        2,
+        3,
+        figsize=(13.5, 8.2),
+        sharex=True,
+        sharey=True,
+        constrained_layout=True,
+    )
+    norm = LogNorm(vmin=1.0, vmax=max_count)
+    mesh = None
+    for row, (_, cigale_label) in enumerate(cigale_columns):
+        for col, (_, estimator_label) in enumerate(SFR_ESTIMATORS):
+            ax = axes[row, col]
+            histogram, x, residual = panels[(row, col)]
+            mesh = ax.pcolormesh(
+                density_x_edges,
+                density_y_edges,
+                np.ma.masked_equal(histogram.T, 0.0),
+                cmap=cmap,
+                norm=norm,
+                shading="auto",
+            )
+            centers, median, p16, p84 = _binned_residual_percentiles(
+                x, residual, axis_ratio_edges, min_bin_count
+            )
+            good_bins = np.isfinite(median)
+            ax.fill_between(
+                centers[good_bins],
+                p16[good_bins],
+                p84[good_bins],
+                color="white",
+                alpha=0.28,
+                linewidth=0.0,
+            )
+            ax.plot(
+                centers[good_bins],
+                median[good_bins],
+                color="white",
+                lw=2.2,
+                marker="o",
+                ms=3.5,
+            )
+            ax.axhline(0.0, color="0.35", lw=1.2, ls="--")
+            rho, _ = spearmanr(x, residual)
+            ax.text(
+                0.04,
+                0.96,
+                f"N = {len(residual):,}\n$\\rho_s$ = {rho:+.2f}\n"
+                f"median $\\Delta$ = {np.median(residual):+.2f}",
+                transform=ax.transAxes,
+                ha="left",
+                va="top",
+                fontsize=9,
+                bbox={"facecolor": "white", "edgecolor": "none", "alpha": 0.82},
+            )
+            if row == 0:
+                ax.set_title(f"Durbala {estimator_label}")
+            if row == 1:
+                ax.set_xlabel(r"SGA axis ratio $b/a$")
+            if col == 0:
+                ax.set_ylabel(
+                    f"CIGALE {cigale_label} − Durbala\n"
+                    r"$\Delta\log_{10}(\mathrm{SFR})$"
+                )
+            ax.set_xlim(0.0, 1.0)
+            ax.set_ylim(residual_low, residual_high)
+            ax.grid(color="0.9", lw=0.6)
+    if mesh is not None:
+        fig.colorbar(mesh, ax=axes.ravel().tolist(), label="Galaxies per bin")
+    return fig, axes
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Cross-match CIGALE and Durbala and create comparison plots."
@@ -397,9 +567,15 @@ def main() -> None:
     sfr_figure.savefig(sfr_path, dpi=180)
     plt.close(sfr_figure)
 
+    axis_ratio_figure, _ = plot_sfr_residual_vs_axis_ratio(matched)
+    axis_ratio_path = args.output_dir / "cigale_durbala_sfr_residual_vs_ba.png"
+    axis_ratio_figure.savefig(axis_ratio_path, dpi=180)
+    plt.close(axis_ratio_figure)
+
     print(f"Matched table: {matched_path}")
     print(f"Mass figure: {mass_path}")
     print(f"SFR figure: {sfr_path}")
+    print(f"SFR residual-axis-ratio figure: {axis_ratio_path}")
 
 
 if __name__ == "__main__":
